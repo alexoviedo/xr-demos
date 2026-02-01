@@ -1,0 +1,1399 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>WebXR HOTAS Visualizer (Gamepad + WebHID)</title>
+  <style>
+    html, body { margin:0; height:100%; background:#05070b; overflow:hidden; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    #ui {
+      position: absolute; top: 12px; left: 12px; z-index: 10;
+      background: rgba(0,0,0,0.55);
+      border: 1px solid rgba(0,255,255,0.20);
+      box-shadow: 0 0 18px rgba(0,255,255,0.12);
+      color: #cfefff;
+      padding: 10px 10px 8px 10px;
+      border-radius: 10px;
+      width: min(520px, calc(100vw - 24px));
+      backdrop-filter: blur(8px);
+    }
+    #ui h1 { margin:0 0 8px 0; font-size: 14px; letter-spacing: 0.04em; color:#aefcff; }
+    .row { display:flex; gap:8px; flex-wrap: wrap; align-items: center; margin: 6px 0; }
+    button, select, input[type="range"] {
+      background: rgba(0,0,0,0.65);
+      border: 1px solid rgba(0,255,255,0.30);
+      color: #d8ffff;
+      padding: 6px 8px;
+      border-radius: 8px;
+      font-size: 12px;
+      outline: none;
+    }
+    button:hover { border-color: rgba(0,255,255,0.55); cursor:pointer; }
+    button:disabled { opacity:0.5; cursor:not-allowed; }
+    label { font-size: 12px; opacity: 0.9; display:flex; align-items:center; gap:8px; }
+    #log {
+      margin-top: 8px;
+      padding: 8px;
+      background: rgba(0,0,0,0.45);
+      border: 1px solid rgba(0,255,255,0.16);
+      border-radius: 8px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 11px;
+      white-space: pre-wrap;
+      max-height: 160px;
+      overflow:auto;
+    }
+    .tiny { font-size: 11px; opacity:0.85; }
+    .deviceCard {
+      border: 1px solid rgba(0,255,255,0.16);
+      border-radius: 8px;
+      padding: 6px;
+      margin-top: 6px;
+      background: rgba(0,0,0,0.35);
+    }
+    .deviceCardHeader { display:flex; justify-content: space-between; gap:10px; align-items:center; }
+    .deviceName { font-size: 12px; color:#bffcff; }
+    .deviceMeta { font-size: 11px; opacity:0.85; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;}
+    #wizard {
+      margin-top: 8px;
+      padding: 8px;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 0, 255, 0.20);
+      background: rgba(20, 0, 22, 0.35);
+      display:none;
+    }
+    #wizardTitle { font-size: 12px; color:#ffd3ff; margin-bottom: 6px; }
+    #wizardPrompt { font-size: 12px; margin-bottom: 8px; }
+    #wizardControls { display:flex; gap:8px; flex-wrap: wrap; }
+    canvas { display:block; }
+  </style>
+
+  <!-- Importmap keeps this single-file and CDN-based (no build step). -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.165.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.165.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+
+<body>
+  <div id="ui">
+    <h1>WEBXR HOTAS VISUALIZER • Gamepad + WebHID • Cyber-Grid</h1>
+
+    <div class="row">
+      <button id="btnHid">Request USB Device (WebHID)</button>
+      <button id="btnRecenter">Re-Center</button>
+      <label title="Deadzone applied to axes to reduce jitter">
+        Deadzone
+        <input id="deadzone" type="range" min="0" max="0.25" step="0.005" value="0.05" />
+        <span id="deadzoneVal" class="tiny">0.050</span>
+      </label>
+      <label title="Smoothing factor for visuals (0 = none, 1 = heavy)">
+        Smooth
+        <input id="smooth" type="range" min="0" max="0.8" step="0.01" value="0.22" />
+        <span id="smoothVal" class="tiny">0.22</span>
+      </label>
+    </div>
+
+    <div class="row">
+      <label>Stick
+        <select id="selStick"></select>
+      </label>
+      <label>Throttle
+        <select id="selThrottle"></select>
+      </label>
+      <label>Pedals
+        <select id="selPedals"></select>
+      </label>
+    </div>
+
+    <div class="tiny">
+      Tip: If inputs look wrong, run “Auto-profile” on each device. Mappings save per device ID in localStorage.
+    </div>
+
+    <div id="devices"></div>
+
+    <div id="wizard">
+      <div id="wizardTitle"></div>
+      <div id="wizardPrompt"></div>
+      <div id="wizardControls">
+        <button id="wizStart">Start Capture</button>
+        <button id="wizSkip">Skip</button>
+        <button id="wizCancel">Cancel</button>
+      </div>
+      <div class="tiny" id="wizStatus"></div>
+    </div>
+
+    <div id="log"></div>
+  </div>
+
+  <script type="module">
+    import * as THREE from "three";
+    import { VRButton } from "three/addons/webxr/VRButton.js";
+
+    /********************************************************************
+     * Logging + small utilities
+     ********************************************************************/
+    const $ = (id) => document.getElementById(id);
+    const logEl = $("log");
+    function log(msg) {
+      const t = new Date().toLocaleTimeString();
+      logEl.textContent = `[${t}] ${msg}\n` + logEl.textContent;
+    }
+
+    function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }
+
+    // Standard deadzone remap for [-1..1] axes: keep continuity by rescaling the remaining range.
+    function applyDeadzoneSigned(v, dz) {
+      const av = Math.abs(v);
+      if (av < dz) return 0;
+      const s = Math.sign(v);
+      return s * ((av - dz) / (1 - dz));
+    }
+
+    // Simple exponential smoothing for visuals.
+    function expSmooth(prev, next, alpha) {
+      // alpha in [0..1], where higher alpha = more smoothing.
+      return prev * alpha + next * (1 - alpha);
+    }
+
+    // Attempt to parse Vendor/Product from a typical Gamepad.id string.
+    function parseVidPidFromGamepadId(id) {
+      // Common Chromium format: "... (Vendor: 046d Product: c215)"
+      let m = id.match(/Vendor:\s*([0-9a-fA-F]{4})\s*Product:\s*([0-9a-fA-F]{4})/);
+      if (m) return { vendorId: parseInt(m[1], 16), productId: parseInt(m[2], 16) };
+
+      // Sometimes: "xxxx-xxxx-Name"
+      m = id.match(/\b([0-9a-fA-F]{4})-([0-9a-fA-F]{4})\b/);
+      if (m) return { vendorId: parseInt(m[1], 16), productId: parseInt(m[2], 16) };
+
+      return { vendorId: null, productId: null };
+    }
+
+    function fmtHex4(n) {
+      if (n === null || n === undefined) return "????";
+      return "0x" + n.toString(16).padStart(4, "0");
+    }
+
+    function safeGamepads() {
+      try {
+        return navigator.getGamepads ? navigator.getGamepads() : [];
+      } catch (e) {
+        log("ERROR: navigator.getGamepads() failed: " + (e?.message ?? e));
+        return [];
+      }
+    }
+
+    /********************************************************************
+     * Known device profiles (GUIDED, not hardcoded indices)
+     *
+     * These profiles do NOT assume axis/button ordering.
+     * They only:
+     *  - recognize device IDs (for nicer UX / role hints)
+     *  - define a step-by-step wizard to learn actual indices
+     ********************************************************************/
+    const KnownProfiles = [
+      {
+        key: "logitech_x56_rhino",
+        label: "Logitech X56 Rhino",
+        match: (id) => /x-?56|x56/i.test(id),
+        roleHint: (id) => (/throttle/i.test(id) ? "throttle" : "stick"),
+        wizard: (role) => {
+          if (role === "throttle") {
+            return [
+              { type: "axis", name: "throttle", prompt: "Move the THROTTLE lever through its full range (min → max → min)." },
+              { type: "axis", name: "throttleFrictionOrRotary", optional: true, prompt: "If you want: twist a rotary/dial you’ll use often (optional)." },
+              { type: "button", name: "throttleButton", optional: true, prompt: "Press a preferred THROTTLE button (optional)." }
+            ];
+          }
+          return [
+            { type: "axis", name: "stickX", prompt: "Move the STICK left ↔ right through full range." },
+            { type: "axis", name: "stickY", prompt: "Move the STICK forward ↔ back through full range." },
+            { type: "axis", name: "rudderTwist", optional: true, prompt: "If your stick has twist: twist fully left ↔ right (optional)." },
+            { type: "button", name: "trigger", prompt: "Press and release the TRIGGER." },
+            { type: "button", name: "hatAny", optional: true, prompt: "Tap any HAT direction (optional)." }
+          ];
+        }
+      },
+      {
+        key: "thrustmaster_t16000m_fcs",
+        label: "Thrustmaster T.16000M FCS",
+        match: (id) => /t\.?\s*16000m|t16000m/i.test(id),
+        roleHint: (_) => "stick",
+        wizard: (_) => ([
+          { type: "axis", name: "stickX", prompt: "Move the STICK left ↔ right through full range." },
+          { type: "axis", name: "stickY", prompt: "Move the STICK forward ↔ back through full range." },
+          { type: "axis", name: "rudderTwist", optional: true, prompt: "Twist the stick fully left ↔ right (optional if present / enabled)." },
+          { type: "axis", name: "slider", optional: true, prompt: "Move the base SLIDER (throttle) fully (optional)." },
+          { type: "button", name: "trigger", prompt: "Press and release the TRIGGER." },
+          { type: "button", name: "hatAny", optional: true, prompt: "Tap any HAT direction (optional)." }
+        ])
+      },
+      {
+        key: "thrustmaster_twcs_throttle",
+        label: "Thrustmaster TWCS Throttle",
+        match: (id) => /twcs/i.test(id),
+        roleHint: (_) => "throttle",
+        wizard: (_) => ([
+          { type: "axis", name: "throttle", prompt: "Move the THROTTLE slider through full range." },
+          { type: "axis", name: "ministickX", optional: true, prompt: "Move the MINI-STICK left ↔ right (optional)." },
+          { type: "axis", name: "ministickY", optional: true, prompt: "Move the MINI-STICK up ↔ down (optional)." },
+          { type: "button", name: "ministickPress", optional: true, prompt: "Press the MINI-STICK button (optional)." }
+        ])
+      },
+      {
+        key: "thrustmaster_tfrp_pedals",
+        label: "Thrustmaster TFRP Pedals",
+        match: (id) => /tfrp|rudder pedals|t\.?flight rudder/i.test(id),
+        roleHint: (_) => "pedals",
+        wizard: (_) => ([
+          { type: "axis", name: "rudder", prompt: "Move the RUDDER axis fully left ↔ right." },
+          { type: "axis", name: "leftBrake", optional: true, prompt: "Press LEFT toe brake (optional if present/exposed)." },
+          { type: "axis", name: "rightBrake", optional: true, prompt: "Press RIGHT toe brake (optional if present/exposed)." }
+        ])
+      },
+      {
+        key: "thrustmaster_tflight_hotas_x_one",
+        label: "Thrustmaster T.Flight HOTAS X / One",
+        match: (id) => /t\.?\s*flight.*hotas.*(x|one)|hotas\s*one|hotas\s*x/i.test(id),
+        roleHint: (_) => "combined",
+        wizard: (_) => ([
+          { type: "axis", name: "stickX", prompt: "Move the STICK left ↔ right through full range." },
+          { type: "axis", name: "stickY", prompt: "Move the STICK forward ↔ back through full range." },
+          { type: "axis", name: "throttle", prompt: "Move the THROTTLE lever through full range." },
+          { type: "axis", name: "rudder", optional: true, prompt: "Twist the stick (or rock the rudder) fully left ↔ right (optional)." },
+          { type: "button", name: "trigger", prompt: "Press and release the TRIGGER." },
+          { type: "button", name: "hatAny", optional: true, prompt: "Tap any HAT direction (optional)." }
+        ])
+      },
+      {
+        key: "microsoft_sidewinder_ffb2",
+        label: "Microsoft SideWinder Force Feedback 2",
+        match: (id) => /sidewinder.*force feedback\s*2|ms\s*sidewinder.*ffb/i.test(id),
+        roleHint: (_) => "stick",
+        wizard: (_) => ([
+          { type: "axis", name: "stickX", prompt: "Move the STICK left ↔ right through full range." },
+          { type: "axis", name: "stickY", prompt: "Move the STICK forward ↔ back through full range." },
+          { type: "axis", name: "rudderTwist", optional: true, prompt: "Twist the stick fully left ↔ right (optional if present/exposed)." },
+          { type: "axis", name: "throttle", optional: true, prompt: "Move the THROTTLE slider (optional)." },
+          { type: "button", name: "trigger", prompt: "Press and release the TRIGGER." }
+        ])
+      }
+    ];
+
+    function getKnownProfileForId(id) {
+      for (const p of KnownProfiles) if (p.match(id)) return p;
+      return null;
+    }
+
+    /********************************************************************
+     * Persistent mappings (per device ID)
+     ********************************************************************/
+    function storageKeyForMapping(deviceId) { return `hotasMapping:v1:${deviceId}`; }
+
+    function loadMapping(deviceId) {
+      try {
+        const raw = localStorage.getItem(storageKeyForMapping(deviceId));
+        if (!raw) return null;
+        return JSON.parse(raw);
+      } catch {
+        return null;
+      }
+    }
+
+    function saveMapping(deviceId, mapping) {
+      try {
+        localStorage.setItem(storageKeyForMapping(deviceId), JSON.stringify(mapping));
+      } catch (e) {
+        log("WARN: Could not save mapping: " + (e?.message ?? e));
+      }
+    }
+
+    /********************************************************************
+     * Gamepad Manager
+     ********************************************************************/
+    class GamepadManager {
+      constructor() {
+        /** @type {Map<number, any>} index -> device snapshot */
+        this.devices = new Map();
+        this.connectedOnce = new Set();
+      }
+
+      update() {
+        const gps = safeGamepads();
+        const seen = new Set();
+
+        for (let i = 0; i < gps.length; i++) {
+          const gp = gps[i];
+          if (!gp) continue;
+          seen.add(gp.index);
+
+          const { vendorId, productId } = parseVidPidFromGamepadId(gp.id || "");
+          const snapshot = {
+            index: gp.index,
+            id: gp.id || `Gamepad ${gp.index}`,
+            mapping: gp.mapping || "unknown",
+            vendorId,
+            productId,
+            axes: gp.axes ? [...gp.axes] : [],
+            buttons: gp.buttons ? gp.buttons.map(b => ({ pressed: !!b.pressed, value: b.value ?? 0 })) : [],
+            timestamp: gp.timestamp ?? performance.now()
+          };
+          this.devices.set(gp.index, snapshot);
+
+          if (!this.connectedOnce.has(gp.index)) {
+            this.connectedOnce.add(gp.index);
+            log(`Gamepad connected: [${gp.index}] ${snapshot.id}`);
+          }
+        }
+
+        // Detect disconnected
+        for (const idx of [...this.devices.keys()]) {
+          if (!seen.has(idx)) {
+            const old = this.devices.get(idx);
+            this.devices.delete(idx);
+            log(`Gamepad disconnected: [${idx}] ${old?.id ?? "unknown"}`);
+          }
+        }
+      }
+
+      list() {
+        return [...this.devices.values()].sort((a,b) => a.index - b.index);
+      }
+
+      get(index) {
+        return this.devices.get(index) || null;
+      }
+    }
+
+    const gpMan = new GamepadManager();
+
+    window.addEventListener("gamepadconnected", (e) => {
+      log(`Event: gamepadconnected → index=${e.gamepad?.index} id="${e.gamepad?.id}"`);
+    });
+    window.addEventListener("gamepaddisconnected", (e) => {
+      log(`Event: gamepaddisconnected → index=${e.gamepad?.index} id="${e.gamepad?.id}"`);
+    });
+
+    /********************************************************************
+     * WebHID Manager (raw stream; decoding is device-specific)
+     ********************************************************************/
+    class HidManager {
+      constructor() {
+        this.supported = !!navigator.hid;
+        /** @type {Map<string, any>} */
+        this.devices = new Map(); // key: `${vendorId}:${productId}:${productName}`
+      }
+
+      _key(dev) {
+        return `${dev.vendorId}:${dev.productId}:${dev.productName || "USBHID"}`;
+      }
+
+      async requestDevice() {
+        if (!this.supported) {
+          log("WebHID not supported in this browser.");
+          return;
+        }
+        try {
+          const devices = await navigator.hid.requestDevice({ filters: [] });
+          if (!devices || devices.length === 0) {
+            log("WebHID: No device selected.");
+            return;
+          }
+          for (const dev of devices) await this.addDevice(dev);
+        } catch (e) {
+          log("WebHID requestDevice() failed: " + (e?.message ?? e));
+        }
+      }
+
+      async addDevice(dev) {
+        const key = this._key(dev);
+        if (this.devices.has(key)) return;
+
+        const record = {
+          vendorId: dev.vendorId,
+          productId: dev.productId,
+          productName: dev.productName || "HID Device",
+          opened: false,
+          lastReport: null,
+          lastReportAt: 0
+        };
+
+        // Listen for input reports (raw bytes)
+        const onInput = (e) => {
+          if (e.device !== dev) return;
+          const dv = e.data;
+          const bytes = [];
+          for (let i = 0; i < dv.byteLength; i++) bytes.push(dv.getUint8(i));
+          record.lastReport = { reportId: e.reportId, bytes };
+          record.lastReportAt = performance.now();
+        };
+        dev.addEventListener("inputreport", onInput);
+
+        try {
+          if (!dev.opened) await dev.open();
+          record.opened = true;
+          log(`WebHID opened: ${record.productName} (${fmtHex4(record.vendorId)}/${fmtHex4(record.productId)})`);
+        } catch (e) {
+          log(`WebHID: Could not open device ${record.productName}: ${e?.message ?? e}`);
+        }
+
+        this.devices.set(key, record);
+      }
+
+      list() {
+        return [...this.devices.values()];
+      }
+    }
+
+    const hidMan = new HidManager();
+    if (navigator.hid) {
+      navigator.hid.addEventListener("connect", (e) => {
+        log(`WebHID connect: ${e.device?.productName ?? "device"} (${fmtHex4(e.device?.vendorId)}/${fmtHex4(e.device?.productId)})`);
+      });
+      navigator.hid.addEventListener("disconnect", (e) => {
+        log(`WebHID disconnect: ${e.device?.productName ?? "device"} (${fmtHex4(e.device?.vendorId)}/${fmtHex4(e.device?.productId)})`);
+      });
+    }
+
+    /********************************************************************
+     * UI state + device selection
+     ********************************************************************/
+    const selStick = $("selStick");
+    const selThrottle = $("selThrottle");
+    const selPedals = $("selPedals");
+    const devicesEl = $("devices");
+
+    const deadzoneEl = $("deadzone");
+    const deadzoneValEl = $("deadzoneVal");
+    const smoothEl = $("smooth");
+    const smoothValEl = $("smoothVal");
+
+    const state = {
+      deadzone: parseFloat(deadzoneEl.value),
+      smoothing: parseFloat(smoothEl.value),
+
+      // Selected gamepad indices (or -1)
+      stickIdx: -1,
+      throttleIdx: -1,
+      pedalsIdx: -1,
+
+      // Visual smoothed values
+      stickX: 0, stickY: 0,
+      throttle: 0,
+      pedals: 0,
+
+      // Current mappings per selected device id
+      mappingCache: new Map(), // deviceId -> mapping
+
+      // Recenter offset for scene rig
+      rigYawOffset: 0,
+      rigPosOffset: new THREE.Vector3(0,0,0),
+
+      // HUD update throttle
+      hudAccum: 0,
+    };
+
+    deadzoneEl.addEventListener("input", () => {
+      state.deadzone = parseFloat(deadzoneEl.value);
+      deadzoneValEl.textContent = state.deadzone.toFixed(3);
+    });
+    smoothEl.addEventListener("input", () => {
+      state.smoothing = parseFloat(smoothEl.value);
+      smoothValEl.textContent = state.smoothing.toFixed(2);
+    });
+
+    $("btnHid").addEventListener("click", async () => {
+      await hidMan.requestDevice();
+    });
+
+    /********************************************************************
+     * Auto-profile Wizard (learn indices by detecting the strongest change)
+     ********************************************************************/
+    const wizardEl = $("wizard");
+    const wizTitleEl = $("wizardTitle");
+    const wizPromptEl = $("wizardPrompt");
+    const wizStatusEl = $("wizStatus");
+    const wizStartBtn = $("wizStart");
+    const wizSkipBtn = $("wizSkip");
+    const wizCancelBtn = $("wizCancel");
+
+    const wizard = {
+      active: false,
+      deviceIndex: -1,
+      deviceId: "",
+      profileKey: "",
+      steps: [],
+      stepIndex: 0,
+      mapping: {}, // { axes: {name:{index, min, max}}, buttons: {name:{index}} }
+      capture: null, // capture state
+    };
+
+    function openWizard(deviceIndex, deviceId, profile) {
+      wizard.active = true;
+      wizard.deviceIndex = deviceIndex;
+      wizard.deviceId = deviceId;
+      wizard.profileKey = profile?.key ?? "unknown";
+      wizard.steps = [];
+
+      // Determine a "role" for this particular device for nicer step selection.
+      const role = profile?.roleHint?.(deviceId) ?? "unknown";
+      wizard.steps = profile?.wizard?.(role) ?? [
+        { type: "axis", name: "stickX", prompt: "Move a primary axis (left ↔ right) fully." },
+        { type: "axis", name: "stickY", prompt: "Move a second axis (forward ↔ back) fully." },
+        { type: "button", name: "trigger", prompt: "Press and release a button." }
+      ];
+
+      // Load existing mapping if present, allow improving/overwriting.
+      const existing = loadMapping(deviceId);
+      wizard.mapping = existing || { axes: {}, buttons: {}, meta: { profileKey: wizard.profileKey, learnedAt: Date.now() } };
+      wizard.stepIndex = 0;
+      wizard.capture = null;
+
+      wizardEl.style.display = "block";
+      const label = profile?.label ?? "Unknown Device";
+      wizTitleEl.textContent = `Auto-profile: ${label}  •  Gamepad[${deviceIndex}]`;
+      renderWizardStep();
+      log(`Wizard started for [${deviceIndex}] ${deviceId}`);
+    }
+
+    function closeWizard(reason) {
+      wizard.active = false;
+      wizardEl.style.display = "none";
+      wizard.capture = null;
+      if (reason) log(`Wizard closed: ${reason}`);
+    }
+
+    function renderWizardStep() {
+      if (!wizard.active) return;
+      const step = wizard.steps[wizard.stepIndex];
+      if (!step) {
+        // Done
+        saveMapping(wizard.deviceId, wizard.mapping);
+        state.mappingCache.set(wizard.deviceId, wizard.mapping);
+        wizTitleEl.textContent = `Auto-profile complete ✓  (saved)`;
+        wizPromptEl.textContent = "Mapping saved. You can close or run again to refine.";
+        wizStatusEl.textContent = JSON.stringify(wizard.mapping, null, 2);
+        wizStartBtn.disabled = true;
+        wizSkipBtn.disabled = true;
+        return;
+      }
+
+      wizStartBtn.disabled = false;
+      wizSkipBtn.disabled = false;
+      wizTitleEl.textContent = `Auto-profile • Step ${wizard.stepIndex + 1}/${wizard.steps.length}`;
+      wizPromptEl.textContent = step.prompt + (step.optional ? "  [optional]" : "");
+      wizStatusEl.textContent = `Device: ${wizard.deviceId}\nRole/Profile: ${wizard.profileKey}\nWaiting…`;
+    }
+
+    function startCapture() {
+      const step = wizard.steps[wizard.stepIndex];
+      if (!step) return;
+
+      const gp = gpMan.get(wizard.deviceIndex);
+      if (!gp) {
+        log("Wizard ERROR: device disappeared.");
+        closeWizard("device disappeared");
+        return;
+      }
+
+      // Capture for ~1.25s
+      const durationMs = 1250;
+      const endAt = performance.now() + durationMs;
+
+      if (step.type === "axis") {
+        wizard.capture = {
+          type: "axis",
+          endAt,
+          baseAxes: [...gp.axes],
+          stats: gp.axes.map(v => ({ min: v, max: v, sum: v, sum2: v*v })),
+          frames: 1,
+          usedIndices: new Set(Object.values(wizard.mapping.axes || {}).map(a => a.index))
+        };
+        wizStatusEl.textContent = "Capturing AXIS motion… move the control continuously.";
+      } else if (step.type === "button") {
+        wizard.capture = {
+          type: "button",
+          endAt,
+          baseButtons: gp.buttons.map(b => !!b.pressed),
+          toggles: gp.buttons.map(_ => 0),
+          last: gp.buttons.map(b => !!b.pressed),
+          usedIndices: new Set(Object.values(wizard.mapping.buttons || {}).map(b => b.index))
+        };
+        wizStatusEl.textContent = "Capturing BUTTON… press/release clearly during capture.";
+      } else {
+        wizard.capture = null;
+      }
+    }
+
+    function finishCapture() {
+      const step = wizard.steps[wizard.stepIndex];
+      const cap = wizard.capture;
+      wizard.capture = null;
+
+      const gp = gpMan.get(wizard.deviceIndex);
+      if (!gp) {
+        log("Wizard ERROR: device disappeared while capturing.");
+        closeWizard("device disappeared");
+        return;
+      }
+
+      if (!step || !cap) return;
+
+      if (cap.type === "axis") {
+        let bestIdx = -1;
+        let bestRange = 0;
+
+        for (let i = 0; i < cap.stats.length; i++) {
+          if (cap.usedIndices.has(i)) continue;
+          const s = cap.stats[i];
+          const range = Math.abs(s.max - s.min);
+          if (range > bestRange) { bestRange = range; bestIdx = i; }
+        }
+
+        if (bestIdx === -1 || bestRange < 0.35) {
+          if (step.optional) {
+            log(`Wizard: skipped optional axis "${step.name}" (no strong movement detected).`);
+            wizard.stepIndex++;
+            renderWizardStep();
+            return;
+          }
+          wizStatusEl.textContent = `No clear axis movement detected (best range=${bestRange.toFixed(3)}). Try again and move ONLY that control.`;
+          log(`Wizard WARN: axis step "${step.name}" ambiguous (range=${bestRange.toFixed(3)}).`);
+          return;
+        }
+
+        // Save axis mapping with observed min/max
+        const s = cap.stats[bestIdx];
+        wizard.mapping.axes = wizard.mapping.axes || {};
+        wizard.mapping.axes[step.name] = {
+          index: bestIdx,
+          observedMin: s.min,
+          observedMax: s.max
+        };
+        wizard.mapping.meta = wizard.mapping.meta || {};
+        wizard.mapping.meta.learnedAt = Date.now();
+
+        log(`Wizard: mapped axis "${step.name}" -> axes[${bestIdx}] (range=${bestRange.toFixed(3)})`);
+        wizard.stepIndex++;
+        renderWizardStep();
+        return;
+      }
+
+      if (cap.type === "button") {
+        let bestIdx = -1;
+        let bestToggles = 0;
+
+        for (let i = 0; i < cap.toggles.length; i++) {
+          if (cap.usedIndices.has(i)) continue;
+          const t = cap.toggles[i];
+          if (t > bestToggles) { bestToggles = t; bestIdx = i; }
+        }
+
+        if (bestIdx === -1 || bestToggles < 1) {
+          if (step.optional) {
+            log(`Wizard: skipped optional button "${step.name}" (no press detected).`);
+            wizard.stepIndex++;
+            renderWizardStep();
+            return;
+          }
+          wizStatusEl.textContent = "No button press detected. Try again and press/release once during capture.";
+          log(`Wizard WARN: button step "${step.name}" got no toggles.`);
+          return;
+        }
+
+        wizard.mapping.buttons = wizard.mapping.buttons || {};
+        wizard.mapping.buttons[step.name] = { index: bestIdx };
+        wizard.mapping.meta = wizard.mapping.meta || {};
+        wizard.mapping.meta.learnedAt = Date.now();
+
+        log(`Wizard: mapped button "${step.name}" -> buttons[${bestIdx}] (toggles=${bestToggles})`);
+        wizard.stepIndex++;
+        renderWizardStep();
+        return;
+      }
+    }
+
+    wizStartBtn.addEventListener("click", () => startCapture());
+    wizSkipBtn.addEventListener("click", () => {
+      const step = wizard.steps[wizard.stepIndex];
+      if (step && !step.optional) {
+        log(`Wizard: cannot skip required step "${step.name}".`);
+        wizStatusEl.textContent = "This step is required. If the mapping is hard, click Start Capture and move only that control.";
+        return;
+      }
+      wizard.stepIndex++;
+      renderWizardStep();
+    });
+    wizCancelBtn.addEventListener("click", () => {
+      // Save partial mapping if any learned
+      if (wizard.active && wizard.deviceId) {
+        saveMapping(wizard.deviceId, wizard.mapping);
+        state.mappingCache.set(wizard.deviceId, wizard.mapping);
+        log("Wizard: partial mapping saved.");
+      }
+      closeWizard("cancel");
+    });
+
+    /********************************************************************
+     * Three.js scene setup (Cyber-Grid / TRON aesthetic)
+     ********************************************************************/
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x05070b);
+
+    const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 100);
+    camera.position.set(0, 1.2, 1.8);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.xr.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    // VR entry button (required flow)
+    document.body.appendChild(VRButton.createButton(renderer));
+
+    // Scene rig allows recentering by offsetting content relative to viewer.
+    const rig = new THREE.Group();
+    scene.add(rig);
+
+    // Lighting: keep simple for Quest performance.
+    const ambient = new THREE.AmbientLight(0x334455, 0.85);
+    rig.add(ambient);
+
+    const keyLight = new THREE.DirectionalLight(0x99ffff, 0.55);
+    keyLight.position.set(2, 3, 1);
+    rig.add(keyLight);
+
+    const magenta = new THREE.PointLight(0xff33ff, 0.35, 10);
+    magenta.position.set(-1.2, 1.8, 0.0);
+    rig.add(magenta);
+
+    // Cyber grid floor
+    const grid = new THREE.GridHelper(20, 40, 0x00ffff, 0x003344);
+    grid.position.y = 0;
+    grid.material.transparent = true;
+    grid.material.opacity = 0.35;
+    rig.add(grid);
+
+    // Subtle fog for depth
+    scene.fog = new THREE.Fog(0x05070b, 3, 16);
+
+    // Neon materials
+    const matCyan = new THREE.MeshStandardMaterial({
+      color: 0x052028,
+      emissive: 0x00ffff,
+      emissiveIntensity: 0.55,
+      metalness: 0.2,
+      roughness: 0.35
+    });
+
+    const matMagenta = new THREE.MeshStandardMaterial({
+      color: 0x160018,
+      emissive: 0xff33ff,
+      emissiveIntensity: 0.55,
+      metalness: 0.2,
+      roughness: 0.4
+    });
+
+    const matDark = new THREE.MeshStandardMaterial({
+      color: 0x071018,
+      emissive: 0x001018,
+      emissiveIntensity: 0.25,
+      metalness: 0.15,
+      roughness: 0.7
+    });
+
+    const matPulse = new THREE.MeshStandardMaterial({
+      color: 0x061018,
+      emissive: 0x00ffff,
+      emissiveIntensity: 0.2,
+      metalness: 0.2,
+      roughness: 0.5
+    });
+
+    // Build 3D "hardware" at seated height (~1.0-1.2m)
+    const hardware = new THREE.Group();
+    hardware.position.set(0, 1.08, -0.95);
+    rig.add(hardware);
+
+    // Layout positions
+    const stickPos = new THREE.Vector3(-0.35, 0, 0);
+    const throttlePos = new THREE.Vector3(0.35, 0, 0);
+    const pedalsPos = new THREE.Vector3(0, -0.35, -0.35);
+
+    /********************************************************************
+     * Flight Stick Model (tilt X/Y, trigger + hat feedback)
+     ********************************************************************/
+    const stickRoot = new THREE.Group();
+    stickRoot.position.copy(stickPos);
+    hardware.add(stickRoot);
+
+    // Base
+    const stickBase = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.14, 0.04, 24), matDark);
+    stickBase.position.set(0, -0.02, 0);
+    stickRoot.add(stickBase);
+
+    // Gimbal pivot
+    const stickPivot = new THREE.Group();
+    stickPivot.position.set(0, 0.02, 0);
+    stickRoot.add(stickPivot);
+
+    // Pillar / shaft
+    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.04, 0.22, 20), matCyan);
+    shaft.position.set(0, 0.12, 0);
+    stickPivot.add(shaft);
+
+    // Grip
+    const grip = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.10, 0.07), matCyan);
+    grip.position.set(0, 0.23, 0);
+    stickPivot.add(grip);
+
+    // Trigger
+    const trigger = new THREE.Mesh(new THREE.BoxGeometry(0.018, 0.03, 0.03), matPulse);
+    trigger.position.set(0.035, 0.225, 0.04);
+    stickPivot.add(trigger);
+
+    // Hat switch
+    const hat = new THREE.Mesh(new THREE.CylinderGeometry(0.016, 0.016, 0.012, 16), matPulse);
+    hat.position.set(-0.02, 0.255, 0.02);
+    hat.rotation.x = Math.PI * 0.5;
+    stickPivot.add(hat);
+
+    /********************************************************************
+     * Throttle Model (linear slider on rail)
+     ********************************************************************/
+    const throttleRoot = new THREE.Group();
+    throttleRoot.position.copy(throttlePos);
+    hardware.add(throttleRoot);
+
+    const throttleBase = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.04, 0.16), matDark);
+    throttleBase.position.set(0, -0.02, 0);
+    throttleRoot.add(throttleBase);
+
+    const rail = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.02, 0.03), matMagenta);
+    rail.position.set(0, 0.01, -0.04);
+    throttleRoot.add(rail);
+
+    const throttleSlider = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.05, 0.08), matMagenta);
+    throttleSlider.position.set(-0.11, 0.03, -0.04);
+    throttleRoot.add(throttleSlider);
+
+    // Simple "detent" indicator
+    const detent = new THREE.Mesh(new THREE.BoxGeometry(0.01, 0.03, 0.10), matPulse);
+    detent.position.set(0, 0.025, -0.04);
+    throttleRoot.add(detent);
+
+    /********************************************************************
+     * Rudder Pedals Model (two plates slide in opposition)
+     ********************************************************************/
+    const pedalsRoot = new THREE.Group();
+    pedalsRoot.position.copy(pedalsPos);
+    hardware.add(pedalsRoot);
+
+    const pedalsBase = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.03, 0.20), matDark);
+    pedalsBase.position.set(0, -0.02, 0);
+    pedalsRoot.add(pedalsBase);
+
+    const pedalLeft = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.02, 0.12), matCyan);
+    const pedalRight = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.02, 0.12), matCyan);
+    pedalLeft.position.set(-0.13, 0.01, 0);
+    pedalRight.position.set(0.13, 0.01, 0);
+    pedalsRoot.add(pedalLeft, pedalRight);
+
+    const pedalGuide = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.008, 0.008), matPulse);
+    pedalGuide.position.set(0, 0.006, -0.07);
+    pedalsRoot.add(pedalGuide);
+
+    /********************************************************************
+     * VR HUD (floating cockpit data panel rendered from a CanvasTexture)
+     ********************************************************************/
+    const hudCanvas = document.createElement("canvas");
+    hudCanvas.width = 1024;
+    hudCanvas.height = 768;
+    const hudCtx = hudCanvas.getContext("2d");
+
+    const hudTex = new THREE.CanvasTexture(hudCanvas);
+    hudTex.minFilter = THREE.LinearFilter;
+    hudTex.magFilter = THREE.LinearFilter;
+
+    const hudMat = new THREE.MeshBasicMaterial({ map: hudTex, transparent: true });
+    const hudMesh = new THREE.Mesh(new THREE.PlaneGeometry(0.8, 0.6), hudMat);
+    hudMesh.position.set(0, 1.35, -1.2);
+    rig.add(hudMesh);
+
+    function drawHud(lines) {
+      hudCtx.clearRect(0, 0, hudCanvas.width, hudCanvas.height);
+
+      // Frame
+      hudCtx.fillStyle = "rgba(0,0,0,0.55)";
+      hudCtx.fillRect(0, 0, hudCanvas.width, hudCanvas.height);
+
+      hudCtx.strokeStyle = "rgba(0,255,255,0.35)";
+      hudCtx.lineWidth = 4;
+      hudCtx.strokeRect(10, 10, hudCanvas.width - 20, hudCanvas.height - 20);
+
+      hudCtx.font = "28px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
+      hudCtx.fillStyle = "rgba(175,255,255,0.95)";
+      hudCtx.fillText("HOTAS VISUALIZER • LIVE INPUT", 28, 52);
+
+      hudCtx.font = "20px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
+      let y = 92;
+      for (const l of lines) {
+        hudCtx.fillStyle = l.startsWith("WARN") ? "rgba(255,160,160,0.95)" :
+                          l.startsWith("HID")  ? "rgba(255,190,255,0.95)" :
+                          "rgba(200,255,255,0.92)";
+        hudCtx.fillText(l.slice(0, 120), 28, y);
+        y += 26;
+        if (y > hudCanvas.height - 24) break;
+      }
+
+      hudTex.needsUpdate = true;
+    }
+
+    /********************************************************************
+     * Device selection helpers
+     ********************************************************************/
+    function setSelectOptions(selectEl, devices) {
+      // Preserve current selection if possible
+      const prev = parseInt(selectEl.value ?? "-1", 10);
+
+      selectEl.innerHTML = "";
+      const optNone = document.createElement("option");
+      optNone.value = "-1";
+      optNone.textContent = "— none —";
+      selectEl.appendChild(optNone);
+
+      for (const d of devices) {
+        const opt = document.createElement("option");
+        opt.value = String(d.index);
+        const short = d.id.length > 60 ? d.id.slice(0, 57) + "…" : d.id;
+        opt.textContent = `[${d.index}] ${short}`;
+        selectEl.appendChild(opt);
+      }
+
+      if (devices.some(d => d.index === prev)) selectEl.value = String(prev);
+      else selectEl.value = "-1";
+    }
+
+    function autoAssignRoles(devices) {
+      // If user already set them, keep.
+      if (state.stickIdx !== -1 || state.throttleIdx !== -1 || state.pedalsIdx !== -1) return;
+
+      // Otherwise try to infer based on known profiles + keywords.
+      for (const d of devices) {
+        const profile = getKnownProfileForId(d.id);
+        const hint = profile?.roleHint?.(d.id) ?? (
+          /throttle/i.test(d.id) ? "throttle" :
+          /rudder|pedal/i.test(d.id) ? "pedals" :
+          "stick"
+        );
+
+        if (hint === "stick" && state.stickIdx === -1) state.stickIdx = d.index;
+        if (hint === "throttle" && state.throttleIdx === -1) state.throttleIdx = d.index;
+        if (hint === "pedals" && state.pedalsIdx === -1) state.pedalsIdx = d.index;
+      }
+
+      // If we only have one device, assume it’s combined and use it for stick+throttle if throttle is unset.
+      if (devices.length === 1) {
+        state.stickIdx = devices[0].index;
+        if (state.throttleIdx === -1) state.throttleIdx = devices[0].index;
+      }
+    }
+
+    function refreshRoleSelects(devices) {
+      setSelectOptions(selStick, devices);
+      setSelectOptions(selThrottle, devices);
+      setSelectOptions(selPedals, devices);
+
+      selStick.value = String(state.stickIdx);
+      selThrottle.value = String(state.throttleIdx);
+      selPedals.value = String(state.pedalsIdx);
+    }
+
+    selStick.addEventListener("change", () => state.stickIdx = parseInt(selStick.value, 10));
+    selThrottle.addEventListener("change", () => state.throttleIdx = parseInt(selThrottle.value, 10));
+    selPedals.addEventListener("change", () => state.pedalsIdx = parseInt(selPedals.value, 10));
+
+    /********************************************************************
+     * Re-center: align rig relative to current viewer/camera
+     ********************************************************************/
+    function recenter() {
+      // Align content so it sits comfortably in front of the user.
+      // We take the camera's world position and yaw, then set the rig offset to negate it.
+      const cam = renderer.xr.isPresenting ? renderer.xr.getCamera(camera) : camera;
+
+      const worldPos = new THREE.Vector3();
+      cam.getWorldPosition(worldPos);
+
+      // Extract yaw from camera quaternion
+      const q = new THREE.Quaternion();
+      cam.getWorldQuaternion(q);
+      const e = new THREE.Euler().setFromQuaternion(q, "YXZ");
+      const yaw = e.y;
+
+      // Desired "desk" location in viewer space (a bit below and forward)
+      // We'll simply reset rig to origin and then place hardware group at fixed offsets (already done),
+      // but compensate for user's current yaw/position so the scene appears recentered.
+      state.rigYawOffset = -yaw;
+      state.rigPosOffset.copy(worldPos).multiplyScalar(-1);
+
+      rig.position.copy(state.rigPosOffset);
+      rig.rotation.set(0, state.rigYawOffset, 0);
+
+      log("Re-centered rig to current viewer pose.");
+    }
+
+    $("btnRecenter").addEventListener("click", recenter);
+
+    /********************************************************************
+     * Mapping usage: get axis/button indices from learned mapping
+     ********************************************************************/
+    function getMappingForDevice(gp) {
+      if (!gp) return null;
+      if (state.mappingCache.has(gp.id)) return state.mappingCache.get(gp.id);
+      const m = loadMapping(gp.id);
+      if (m) state.mappingCache.set(gp.id, m);
+      return m || null;
+    }
+
+    function readAxis(gp, mapping, name, fallbackIndex = 0) {
+      const idx = mapping?.axes?.[name]?.index;
+      const i = (typeof idx === "number") ? idx : fallbackIndex;
+      if (!gp.axes || i < 0 || i >= gp.axes.length) return 0;
+      return gp.axes[i] ?? 0;
+    }
+
+    function readButton(gp, mapping, name, fallbackIndex = 0) {
+      const idx = mapping?.buttons?.[name]?.index;
+      const i = (typeof idx === "number") ? idx : fallbackIndex;
+      if (!gp.buttons || i < 0 || i >= gp.buttons.length) return false;
+      return !!gp.buttons[i]?.pressed;
+    }
+
+    // Convert an axis into [0..1] for throttle.
+    // If observed min/max exists, use it to normalize robustly.
+    function axisTo01(gp, mapping, axisName, fallbackIndex = 2) {
+      const idx = mapping?.axes?.[axisName]?.index;
+      const obsMin = mapping?.axes?.[axisName]?.observedMin;
+      const obsMax = mapping?.axes?.[axisName]?.observedMax;
+      const i = (typeof idx === "number") ? idx : fallbackIndex;
+      const v = (gp.axes && gp.axes[i] !== undefined) ? gp.axes[i] : 0;
+
+      // If we learned min/max, normalize to 0..1 based on observed extremes.
+      if (typeof obsMin === "number" && typeof obsMax === "number" && Math.abs(obsMax - obsMin) > 0.25) {
+        const t = (v - obsMin) / (obsMax - obsMin);
+        return clamp(t, 0, 1);
+      }
+
+      // Otherwise assume common cases:
+      // - many throttles report [-1..1] (often -1 = max or min depending on device)
+      // We'll pick a sensible default: map [-1..1] to [0..1] and invert if it "feels" reversed later.
+      return clamp((v + 1) * 0.5, 0, 1);
+    }
+
+    /********************************************************************
+     * Render device cards + auto-profile buttons
+     ********************************************************************/
+    function renderDeviceCards(devices) {
+      devicesEl.innerHTML = "";
+      for (const d of devices) {
+        const card = document.createElement("div");
+        card.className = "deviceCard";
+
+        const profile = getKnownProfileForId(d.id);
+        const role = profile?.roleHint?.(d.id) ?? (/throttle/i.test(d.id) ? "throttle" : /rudder|pedal/i.test(d.id) ? "pedals" : "stick");
+
+        const header = document.createElement("div");
+        header.className = "deviceCardHeader";
+
+        const left = document.createElement("div");
+        left.innerHTML = `<div class="deviceName">[${d.index}] ${profile ? profile.label : "Unknown Device"}</div>
+                          <div class="deviceMeta">${d.id}</div>
+                          <div class="deviceMeta">VID/PID: ${fmtHex4(d.vendorId)}/${fmtHex4(d.productId)} • mapping=${d.mapping} • roleHint=${role}</div>`;
+
+        const right = document.createElement("div");
+        const btn = document.createElement("button");
+        btn.textContent = "Auto-profile";
+        btn.addEventListener("click", () => {
+          const p = profile || {
+            key: "unknown",
+            label: "Unknown Device",
+            roleHint: () => role,
+            wizard: () => ([
+              { type: "axis", name: "stickX", prompt: "Move a primary axis fully (left ↔ right)." },
+              { type: "axis", name: "stickY", prompt: "Move another axis fully (forward ↔ back)." },
+              { type: "button", name: "trigger", prompt: "Press and release a button." },
+              { type: "axis", name: "throttle", optional: true, prompt: "Move a throttle/slider axis (optional)." }
+            ])
+          };
+          openWizard(d.index, d.id, p);
+        });
+
+        right.appendChild(btn);
+        header.appendChild(left);
+        header.appendChild(right);
+        card.appendChild(header);
+
+        // Show learned mapping summary
+        const m = getMappingForDevice(d);
+        const summary = document.createElement("div");
+        summary.className = "deviceMeta";
+        summary.style.marginTop = "6px";
+        summary.textContent = m
+          ? `learned: axes=${Object.keys(m.axes || {}).join(", ") || "—"} • buttons=${Object.keys(m.buttons || {}).join(", ") || "—"}`
+          : "learned: — (no saved mapping yet)";
+        card.appendChild(summary);
+
+        devicesEl.appendChild(card);
+      }
+    }
+
+    /********************************************************************
+     * Wizard capture update
+     ********************************************************************/
+    function updateWizardCapture(dt) {
+      if (!wizard.active || !wizard.capture) return;
+      const cap = wizard.capture;
+      const step = wizard.steps[wizard.stepIndex];
+      const gp = gpMan.get(wizard.deviceIndex);
+      if (!gp) {
+        closeWizard("device disappeared");
+        return;
+      }
+
+      const now = performance.now();
+      if (cap.type === "axis") {
+        cap.frames++;
+        for (let i = 0; i < gp.axes.length; i++) {
+          const v = gp.axes[i] ?? 0;
+          const s = cap.stats[i] || (cap.stats[i] = { min: v, max: v, sum: 0, sum2: 0 });
+          s.min = Math.min(s.min, v);
+          s.max = Math.max(s.max, v);
+          s.sum += v;
+          s.sum2 += v*v;
+        }
+      } else if (cap.type === "button") {
+        for (let i = 0; i < gp.buttons.length; i++) {
+          const pressed = !!gp.buttons[i]?.pressed;
+          if (pressed !== cap.last[i]) cap.toggles[i] += 1;
+          cap.last[i] = pressed;
+        }
+      }
+
+      if (now >= cap.endAt) {
+        finishCapture();
+      } else {
+        const remaining = Math.max(0, cap.endAt - now);
+        wizStatusEl.textContent = `Capturing "${step.name}" (${step.type})… ${Math.ceil(remaining)}ms remaining`;
+      }
+    }
+
+    /********************************************************************
+     * Main input polling and visuals update
+     ********************************************************************/
+    function updateInputsAndVisuals(dt) {
+      const dz = state.deadzone;
+      const smoothing = state.smoothing;
+
+      const gpStick = state.stickIdx >= 0 ? gpMan.get(state.stickIdx) : null;
+      const gpThrottle = state.throttleIdx >= 0 ? gpMan.get(state.throttleIdx) : null;
+      const gpPedals = state.pedalsIdx >= 0 ? gpMan.get(state.pedalsIdx) : null;
+
+      const mStick = gpStick ? getMappingForDevice(gpStick) : null;
+      const mThrottle = gpThrottle ? getMappingForDevice(gpThrottle) : null;
+      const mPedals = gpPedals ? getMappingForDevice(gpPedals) : null;
+
+      // Stick X/Y (fallback indices 0,1)
+      let rawX = gpStick ? readAxis(gpStick, mStick, "stickX", 0) : 0;
+      let rawY = gpStick ? readAxis(gpStick, mStick, "stickY", 1) : 0;
+
+      rawX = applyDeadzoneSigned(rawX, dz);
+      rawY = applyDeadzoneSigned(rawY, dz);
+
+      // Throttle [0..1] (fallback index 2 by convention; learned mapping is preferred)
+      let rawThrottle01 = gpThrottle ? axisTo01(gpThrottle, mThrottle, "throttle", 2) : 0;
+
+      // Pedals (rudder) signed (fallback 0)
+      let rawPedals = gpPedals ? readAxis(gpPedals, mPedals, "rudder", 0) : 0;
+      rawPedals = applyDeadzoneSigned(rawPedals, dz);
+
+      // Smooth for visuals
+      state.stickX = expSmooth(state.stickX, rawX, smoothing);
+      state.stickY = expSmooth(state.stickY, rawY, smoothing);
+      state.throttle = expSmooth(state.throttle, rawThrottle01, smoothing);
+      state.pedals = expSmooth(state.pedals, rawPedals, smoothing);
+
+      // Apply to 3D models
+      // Stick tilts: rotate around X (pitch) and Z (roll-like) for an intuitive visual
+      const maxTilt = 0.55; // radians
+      stickPivot.rotation.x = state.stickY * maxTilt;     // forward/back
+      stickPivot.rotation.z = -state.stickX * maxTilt;    // left/right
+
+      // Trigger movement + emissive pulse
+      const trigPressed = gpStick ? readButton(gpStick, mStick, "trigger", 0) : false;
+      trigger.position.z = trigPressed ? 0.028 : 0.040;
+      trigger.material.emissiveIntensity = trigPressed ? 1.1 : 0.25;
+
+      // Hat: highlight if any learned hat button pressed, else try standard dpad range (12-15)
+      let hatActive = false;
+      if (gpStick) {
+        const hatIdx = mStick?.buttons?.hatAny?.index;
+        if (typeof hatIdx === "number") {
+          hatActive = !!gpStick.buttons?.[hatIdx]?.pressed;
+        } else {
+          for (let i = 12; i <= 15; i++) if (gpStick.buttons?.[i]?.pressed) hatActive = true;
+        }
+      }
+      hat.material.emissiveIntensity = hatActive ? 1.1 : 0.25;
+
+      // Throttle slider along rail (x range)
+      const xMin = -0.11, xMax = 0.11;
+      throttleSlider.position.x = THREE.MathUtils.lerp(xMin, xMax, state.throttle);
+      throttleSlider.material.emissiveIntensity = 0.65 + 0.35 * state.throttle;
+
+      // Pedals slide in opposition based on rudder axis
+      const pedalTravel = 0.06;
+      pedalLeft.position.z = state.pedals * pedalTravel;
+      pedalRight.position.z = -state.pedals * pedalTravel;
+      pedalLeft.material.emissiveIntensity = 0.45 + 0.35 * Math.abs(state.pedals);
+      pedalRight.material.emissiveIntensity = 0.45 + 0.35 * Math.abs(state.pedals);
+    }
+
+    /********************************************************************
+     * HUD update (throttled for performance)
+     ********************************************************************/
+    function updateHud(dt) {
+      state.hudAccum += dt;
+      if (state.hudAccum < 0.10) return; // ~10 Hz updates
+      state.hudAccum = 0;
+
+      const lines = [];
+      const gps = gpMan.list();
+
+      lines.push(`Gamepads: ${gps.length} • HID: ${hidMan.list().length} • XR: ${renderer.xr.isPresenting ? "ON" : "OFF"}`);
+      lines.push(`Selected: stick=${state.stickIdx} throttle=${state.throttleIdx} pedals=${state.pedalsIdx}`);
+      lines.push(`Axes deadzone=${state.deadzone.toFixed(3)} smooth=${state.smoothing.toFixed(2)}`);
+
+      for (const d of gps) {
+        const profile = getKnownProfileForId(d.id);
+        const label = profile?.label ?? "Unknown";
+        lines.push("");
+        lines.push(`${label}  gp[${d.index}]  VID/PID ${fmtHex4(d.vendorId)}/${fmtHex4(d.productId)}`);
+
+        const m = getMappingForDevice(d);
+        if (m) {
+          const ax = Object.entries(m.axes || {}).map(([k,v]) => `${k}=a${v.index}`).join(" ");
+          const bt = Object.entries(m.buttons || {}).map(([k,v]) => `${k}=b${v.index}`).join(" ");
+          lines.push(`learned: ${ax || "axes:—"} | ${bt || "buttons:—"}`);
+        } else {
+          lines.push("learned: — (run Auto-profile)");
+        }
+
+        // Raw preview (first few axes/buttons)
+        const axPreview = d.axes.slice(0, 8).map((v,i)=>`a${i}:${v.toFixed(2)}`).join(" ");
+        const btPreview = d.buttons.slice(0, 12).map((b,i)=> b.pressed ? `b${i}:1` : `b${i}:0`).join(" ");
+        lines.push(axPreview);
+        lines.push(btPreview);
+      }
+
+      const hids = hidMan.list();
+      for (const h of hids) {
+        lines.push("");
+        lines.push(`HID ${h.productName}  VID/PID ${fmtHex4(h.vendorId)}/${fmtHex4(h.productId)}  open=${h.opened ? "yes" : "no"}`);
+        if (h.lastReport) {
+          const ageMs = Math.floor(performance.now() - h.lastReportAt);
+          const bytes = h.lastReport.bytes.slice(0, 24).map(b => b.toString(16).padStart(2,"0")).join(" ");
+          lines.push(`HID reportId=${h.lastReport.reportId} age=${ageMs}ms bytes=${bytes}${h.lastReport.bytes.length>24?" …":""}`);
+        } else {
+          lines.push("HID lastReport: —");
+        }
+      }
+
+      // Basic warnings
+      if (gps.length === 0) lines.push("", "WARN: No gamepads detected. Plug in USB devices and press buttons/move axes once.");
+      if (!hidMan.supported) lines.push("", "WARN: WebHID not supported here.");
+
+      drawHud(lines);
+    }
+
+    /********************************************************************
+     * Main loop (renderer.setAnimationLoop hits XR refresh rate)
+     ********************************************************************/
+    let lastT = performance.now();
+    function animate() {
+      const t = performance.now();
+      const dt = Math.min(0.05, (t - lastT) / 1000);
+      lastT = t;
+
+      gpMan.update();
+      const devices = gpMan.list();
+
+      // Auto-assign once, then keep user overrides
+      autoAssignRoles(devices);
+
+      // Keep selects in sync (but don’t override if user already changed)
+      refreshRoleSelects(devices);
+      renderDeviceCards(devices);
+
+      // Wizard capture update (if running)
+      updateWizardCapture(dt);
+
+      // Input + visuals
+      updateInputsAndVisuals(dt);
+
+      // Keep HUD in a comfy spot in front of viewer in VR
+      if (renderer.xr.isPresenting) {
+        const cam = renderer.xr.getCamera(camera);
+        const camPos = new THREE.Vector3();
+        cam.getWorldPosition(camPos);
+
+        const q = new THREE.Quaternion();
+        cam.getWorldQuaternion(q);
+        const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(q);
+        fwd.y = 0;
+        fwd.normalize();
+
+        const hudTarget = camPos.clone().add(fwd.multiplyScalar(1.2));
+        hudTarget.y = camPos.y + 0.15;
+
+        hudMesh.position.lerp(hudTarget, 0.25);
+
+        // Face the camera (yaw only)
+        const toCam = camPos.clone().sub(hudMesh.position);
+        toCam.y = 0;
+        toCam.normalize();
+        const yaw = Math.atan2(toCam.x, toCam.z);
+        hudMesh.rotation.set(0, yaw, 0);
+      }
+
+      updateHud(dt);
+
+      renderer.render(scene, camera);
+    }
+
+    renderer.setAnimationLoop(animate);
+
+    /********************************************************************
+     * Resize handling
+     ********************************************************************/
+    window.addEventListener("resize", () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    /********************************************************************
+     * Startup UX
+     ********************************************************************/
+    log("Ready. Plug in HOTAS devices. If mapping looks wrong, run Auto-profile per device.");
+    log("WebHID button opens a USB picker and shows raw reports (decoding is device-specific).");
+
+    // Gentle first-time recenter (non-XR) so the "desk" sits in front.
+    recenter();
+  </script>
+</body>
+</html>

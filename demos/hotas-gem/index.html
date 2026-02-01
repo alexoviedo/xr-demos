@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebXR Flight Hardware Visualizer</title>
+    <style>
+        body {
+            margin: 0;
+            background-color: #050505;
+            color: #00ffcc;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow: hidden;
+        }
+        #ui-overlay {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 10;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            pointer-events: none;
+        }
+        button {
+            padding: 12px 24px;
+            background: rgba(0, 255, 204, 0.1);
+            border: 1px solid #00ffcc;
+            color: #00ffcc;
+            cursor: pointer;
+            pointer-events: auto;
+            font-weight: bold;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            transition: all 0.2s;
+            border-radius: 4px;
+        }
+        button:hover {
+            background: rgba(0, 255, 204, 0.3);
+            box-shadow: 0 0 15px #00ffcc;
+        }
+        button:disabled {
+            border-color: #444;
+            color: #444;
+            cursor: not-allowed;
+        }
+        #status-panel {
+            background: rgba(0, 0, 0, 0.8);
+            border: 1px solid #00ffcc;
+            padding: 10px;
+            font-size: 12px;
+            max-width: 300px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .info { color: #888; margin-bottom: 5px; }
+        .error { color: #ff5555; font-size: 10px; margin-top: 5px; }
+    </style>
+</head>
+<body>
+
+<div id="ui-overlay">
+    <h1>XR FLIGHT LINK</h1>
+    <div id="status-panel">
+        <div class="info">Waiting for VR / Hardware...</div>
+    </div>
+    <button id="vr-button">Enter VR</button>
+    <button id="hid-button">Request USB HID Device</button>
+    <button id="recenter-button">Recenter View</button>
+</div>
+
+<!-- Load Three.js via CDN -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+<script>
+/**
+ * SENIOR GRAPHICS & XR DEVELOPER - WEBXR FLIGHT VISUALIZER
+ * Fixed version: Added Permissions Policy handling for WebHID
+ */
+
+class FlightVisualizer {
+    constructor() {
+        this.scene = null;
+        this.camera = null;
+        this.renderer = null;
+        this.gamepads = [];
+        this.hidDevices = [];
+        this.deadzone = 0.05;
+        this.hidSupported = false;
+        
+        // References to 3D components
+        this.models = {
+            stick: null,
+            stickBase: null,
+            throttle: null,
+            throttleRail: null,
+            pedalLeft: null,
+            pedalRight: null,
+            hud: null,
+            trigger: null
+        };
+
+        this.initThree();
+        this.buildEnvironment();
+        this.buildHardwareModels();
+        this.setupHID();
+        this.setupButtons();
+        this.animate();
+    }
+
+    initThree() {
+        this.scene = new THREE.Scene();
+        this.scene.background = new THREE.Color(0x020205);
+        this.scene.fog = new THREE.Fog(0x020205, 2, 10);
+
+        this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
+        this.camera.position.set(0, 1.2, 0.5); 
+
+        this.renderer = new THREE.WebGLRenderer({ antialias: true });
+        this.renderer.setPixelRatio(window.devicePixelRatio);
+        this.renderer.setSize(window.innerWidth, window.innerHeight);
+        this.renderer.xr.enabled = true;
+        document.body.appendChild(this.renderer.domElement);
+
+        const ambient = new THREE.AmbientLight(0x404040, 0.5);
+        this.scene.add(ambient);
+
+        const pointLight = new THREE.PointLight(0x00ffcc, 1, 10);
+        pointLight.position.set(0, 2, 0);
+        this.scene.add(pointLight);
+
+        window.addEventListener('resize', () => {
+            this.camera.aspect = window.innerWidth / window.innerHeight;
+            this.camera.updateProjectionMatrix();
+            this.renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    }
+
+    buildEnvironment() {
+        const grid = new THREE.GridHelper(20, 40, 0x00ffcc, 0x222222);
+        this.scene.add(grid);
+
+        const frameGeo = new THREE.BoxGeometry(1.2, 0.8, 1.2);
+        const frameMat = new THREE.MeshBasicMaterial({ color: 0x00ffcc, wireframe: true, opacity: 0.1, transparent: true });
+        const frame = new THREE.Mesh(frameGeo, frameMat);
+        frame.position.y = 0.8;
+        this.scene.add(frame);
+
+        const hudCanvas = document.createElement('canvas');
+        hudCanvas.width = 512;
+        hudCanvas.height = 512;
+        this.hudContext = hudCanvas.getContext('2d');
+        const hudTex = new THREE.CanvasTexture(hudCanvas);
+        const hudMat = new THREE.MeshBasicMaterial({ map: hudTex, transparent: true, opacity: 0.8, side: THREE.DoubleSide });
+        const hudGeo = new THREE.PlaneGeometry(0.6, 0.6);
+        this.models.hud = new THREE.Mesh(hudGeo, hudMat);
+        this.models.hud.position.set(0, 1.5, -0.8);
+        this.scene.add(this.models.hud);
+    }
+
+    buildHardwareModels() {
+        const neonMat = (color) => new THREE.MeshStandardMaterial({ 
+            color: color, 
+            emissive: color, 
+            emissiveIntensity: 0.8,
+            metalness: 0.9,
+            roughness: 0.1
+        });
+
+        const metalMat = new THREE.MeshStandardMaterial({ color: 0x111111, metalness: 1, roughness: 0.3 });
+
+        // STICK
+        const stickGroup = new THREE.Group();
+        const stickBase = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.05, 0.15), metalMat);
+        const stickShaft = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.02, 0.3), neonMat(0x00ffff));
+        stickShaft.position.y = 0.15;
+        
+        const trigger = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.04, 0.02), neonMat(0xff0055));
+        trigger.position.set(0, 0.28, 0.03);
+        stickShaft.add(trigger);
+        this.models.trigger = trigger;
+
+        stickGroup.add(stickShaft);
+        stickGroup.add(stickBase);
+        stickGroup.position.set(0, 0.8, -0.3); 
+        this.scene.add(stickGroup);
+        this.models.stick = stickShaft;
+
+        // THROTTLE
+        const throttleGroup = new THREE.Group();
+        const throttleRail = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.02, 0.4), metalMat);
+        const throttleHandle = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.08, 0.08), neonMat(0x00ffcc));
+        throttleHandle.position.y = 0.05;
+        throttleGroup.add(throttleRail);
+        throttleGroup.add(throttleHandle);
+        throttleGroup.position.set(-0.4, 0.8, -0.3); 
+        this.scene.add(throttleGroup);
+        this.models.throttle = throttleHandle;
+
+        // PEDALS
+        const pedalGroup = new THREE.Group();
+        const pedalBase = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.02, 0.3), metalMat);
+        
+        const pedalLeft = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.03, 0.2), neonMat(0xffaa00));
+        pedalLeft.position.set(-0.15, 0.03, 0);
+        
+        const pedalRight = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.03, 0.2), neonMat(0xffaa00));
+        pedalRight.position.set(0.15, 0.03, 0);
+        
+        pedalGroup.add(pedalBase, pedalLeft, pedalRight);
+        pedalGroup.position.set(0, 0.05, -0.6); 
+        this.scene.add(pedalGroup);
+        this.models.pedalLeft = pedalLeft;
+        this.models.pedalRight = pedalRight;
+    }
+
+    async setupHID() {
+        // Wrap in try-catch to handle Permissions Policy errors
+        if (!('hid' in navigator)) {
+            this.hidSupported = false;
+            this.updateStatus();
+            return;
+        }
+
+        try {
+            // Attempting to get existing devices. 
+            // In many sandboxed environments, this will throw a SecurityError.
+            const devices = await navigator.hid.getDevices();
+            this.hidDevices = devices;
+            this.hidSupported = true;
+
+            navigator.hid.addEventListener('connect', ({ device }) => {
+                this.hidDevices.push(device);
+                this.updateStatus();
+            });
+        } catch (err) {
+            console.warn("WebHID access restricted by policy:", err.message);
+            this.hidSupported = false;
+            // Disable HID button if the feature is disallowed
+            const hidBtn = document.getElementById('hid-button');
+            if (hidBtn) {
+                hidBtn.disabled = true;
+                hidBtn.title = "HID is disallowed by permissions policy in this environment.";
+            }
+        }
+        
+        this.updateStatus();
+    }
+
+    setupButtons() {
+        document.getElementById('vr-button').onclick = () => {
+            this.renderer.xr.getSession() ? null : this.enterVR();
+        };
+
+        document.getElementById('hid-button').onclick = async () => {
+            if (!this.hidSupported && !('hid' in navigator)) return;
+            try {
+                const devices = await navigator.hid.requestDevice({ filters: [] });
+                if (devices.length > 0) {
+                    await devices[0].open();
+                    this.hidDevices.push(devices[0]);
+                    this.updateStatus();
+                }
+            } catch (e) {
+                console.error("HID Request Failed:", e.message);
+                this.updateStatus(`HID Error: ${e.message}`);
+            }
+        };
+
+        document.getElementById('recenter-button').onclick = () => {
+            console.log("Recenter local view triggered");
+            if (this.renderer.xr.isPresenting) {
+                // Usually handled by XR system, but we can reset internal state
+            }
+        };
+    }
+
+    async enterVR() {
+        try {
+            const sessionInit = { optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'] };
+            const session = await navigator.xr.requestSession('immersive-vr', sessionInit);
+            this.renderer.xr.setSession(session);
+            document.getElementById('ui-overlay').style.display = 'none';
+            
+            session.addEventListener('end', () => {
+                document.getElementById('ui-overlay').style.display = 'flex';
+            });
+        } catch (err) {
+            console.error("Failed to enter VR:", err);
+        }
+    }
+
+    updateStatus(errorMsg = null) {
+        const panel = document.getElementById('status-panel');
+        let html = "<strong>Hardware Status:</strong><br>";
+        
+        const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+        let gpCount = 0;
+        for (let i = 0; i < gamepads.length; i++) {
+            const gp = gamepads[i];
+            if (gp) {
+                gpCount++;
+                html += `<div class="info">GP[${i}]: ${gp.id.substring(0, 20)}...<br>Axes: ${gp.axes.length} | Buttons: ${gp.buttons.length}</div>`;
+            }
+        }
+
+        if (gpCount === 0) {
+            html += `<div class="info">No Gamepads detected.</div>`;
+        }
+
+        if (this.hidSupported) {
+            this.hidDevices.forEach(d => {
+                html += `<div class="info" style="color:#00ffcc">USB HID: ${d.productName}</div>`;
+            });
+        } else {
+            html += `<div class="error">WebHID restricted or unsupported.</div>`;
+        }
+
+        if (errorMsg) {
+            html += `<div class="error">${errorMsg}</div>`;
+        }
+
+        panel.innerHTML = html;
+    }
+
+    processInput() {
+        const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+        let stickState = { x: 0, y: 0, twist: 0, trigger: false };
+        let throttleVal = 0;
+        let rudderVal = 0;
+
+        let debugText = "SYSTEM DIAGNOSTICS\n------------------\n";
+
+        for (let i = 0; i < gamepads.length; i++) {
+            const gp = gamepads[i];
+            if (!gp) continue;
+
+            debugText += `GP[${i}]: ${gp.id.slice(0,12)}\n`;
+            
+            const id = gp.id.toLowerCase();
+            const isThrottle = id.includes('throttle') || (gp.axes.length === 1);
+            const isPedals = id.includes('pedal') || id.includes('rudder');
+
+            if (isPedals) {
+                rudderVal = this.applyDeadzone(gp.axes[0]);
+                debugText += ` RUD: ${rudderVal.toFixed(2)}\n`;
+            } else if (isThrottle) {
+                throttleVal = (gp.axes[0] + 1) / 2;
+                debugText += ` THR: ${(throttleVal * 100).toFixed(0)}%\n`;
+            } else {
+                stickState.x = this.applyDeadzone(gp.axes[0]);
+                stickState.y = this.applyDeadzone(gp.axes[1]);
+                if (gp.axes.length > 2) stickState.twist = this.applyDeadzone(gp.axes[2]);
+                if (gp.buttons.length > 0) stickState.trigger = gp.buttons[0].pressed;
+                
+                debugText += ` STK: X:${stickState.x.toFixed(2)} Y:${stickState.y.toFixed(2)}\n`;
+            }
+        }
+
+        this.updateModels(stickState, throttleVal, rudderVal);
+        this.updateHUD(debugText);
+    }
+
+    applyDeadzone(val) {
+        if (Math.abs(val) < this.deadzone) return 0;
+        return val;
+    }
+
+    updateModels(stk, thr, rud) {
+        if (this.models.stick) {
+            this.models.stick.rotation.x = stk.y * 0.4; 
+            this.models.stick.rotation.z = -stk.x * 0.4;
+            this.models.stick.rotation.y = -stk.twist * 0.3; 
+            
+            if (this.models.trigger) {
+                this.models.trigger.material.emissiveIntensity = stk.trigger ? 5.0 : 0.8;
+                this.models.trigger.position.z = stk.trigger ? 0.025 : 0.03;
+            }
+        }
+
+        if (this.models.throttle) {
+            this.models.throttle.position.z = 0.2 - (thr * 0.4);
+        }
+
+        if (this.models.pedalLeft && this.models.pedalRight) {
+            const travel = 0.1;
+            this.models.pedalLeft.position.z = rud * travel;
+            this.models.pedalRight.position.z = -rud * travel;
+        }
+    }
+
+    updateHUD(text) {
+        if (!this.hudContext) return;
+        const ctx = this.hudContext;
+        ctx.clearRect(0, 0, 512, 512);
+        
+        ctx.fillStyle = "rgba(0, 20, 20, 0.8)";
+        ctx.fillRect(0, 0, 512, 512);
+        ctx.strokeStyle = "#00ffcc";
+        ctx.lineWidth = 5;
+        ctx.strokeRect(5, 5, 502, 502);
+
+        ctx.fillStyle = "#00ffcc";
+        ctx.font = "24px monospace";
+        const lines = text.split('\n');
+        lines.forEach((line, i) => {
+            ctx.fillText(line, 30, 60 + (i * 30));
+        });
+
+        this.models.hud.material.map.needsUpdate = true;
+    }
+
+    animate() {
+        this.renderer.setAnimationLoop(() => {
+            this.processInput();
+            this.renderer.render(this.scene, this.camera);
+            
+            if (Date.now() % 3000 < 20) {
+                this.updateStatus();
+            }
+        });
+    }
+}
+
+window.onload = () => {
+    window.app = new FlightVisualizer();
+};
+
+</script>
+</body>
+</html>

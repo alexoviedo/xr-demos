@@ -1,0 +1,1311 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>WebXR HOTAS Visualizer (Gamepad + WebHID)</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; background: #05060a; overflow: hidden; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    #ui {
+      position: absolute; top: 12px; left: 12px; z-index: 10;
+      width: min(540px, calc(100vw - 24px));
+      background: rgba(0,0,0,0.55);
+      border: 1px solid rgba(0,255,255,0.25);
+      box-shadow: 0 0 18px rgba(0,255,255,0.12);
+      border-radius: 10px;
+      padding: 10px 10px 12px 10px;
+      color: #d9fbff;
+      backdrop-filter: blur(6px);
+    }
+    #ui h1 { font-size: 14px; margin: 0 0 6px 0; color: #a7ffff; letter-spacing: 0.5px; }
+    #row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    button {
+      background: rgba(0,255,255,0.10);
+      border: 1px solid rgba(0,255,255,0.35);
+      color: #d9fbff;
+      border-radius: 9px;
+      padding: 8px 10px;
+      cursor: pointer;
+      font-weight: 600;
+      letter-spacing: 0.2px;
+    }
+    button:hover { background: rgba(0,255,255,0.18); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .small { font-size: 12px; opacity: 0.95; }
+    .pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: rgba(0,255,255,0.10);
+      border: 1px solid rgba(0,255,255,0.25);
+      color: #bffcff;
+      font-size: 12px;
+      margin-left: 6px;
+    }
+    #controls {
+      margin-top: 8px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    #controls .box {
+      padding: 8px;
+      border-radius: 10px;
+      border: 1px solid rgba(0,255,255,0.18);
+      background: rgba(0,0,0,0.35);
+    }
+    label { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; }
+    input[type="range"] { width: 180px; }
+    #status {
+      margin-top: 8px;
+      font-size: 12px;
+      line-height: 1.35;
+      color: #c9f9ff;
+      opacity: 0.96;
+      white-space: pre-wrap;
+      max-height: 150px;
+      overflow: auto;
+      border-top: 1px solid rgba(0,255,255,0.18);
+      padding-top: 8px;
+    }
+    #tip {
+      margin-top: 8px;
+      font-size: 12px;
+      color: #baf6ff;
+      opacity: 0.95;
+    }
+    canvas { display:block; }
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <h1>WebXR HOTAS Visualizer <span class="pill">Cyber-Grid</span></h1>
+    <div id="row">
+      <!-- VRButton will be injected here -->
+      <button id="btnHID">Request USB Device (WebHID)</button>
+      <button id="btnRecenter">Re-center</button>
+      <button id="btnClearCal">Clear Saved Cal</button>
+    </div>
+
+    <div id="controls">
+      <div class="box">
+        <div class="small" style="margin-bottom:6px; color:#a7ffff; font-weight:700;">Input</div>
+        <label>Deadzone: <input id="deadzone" type="range" min="0" max="0.25" step="0.005" value="0.05"><span id="deadzoneVal">0.05</span></label>
+        <div style="margin-top:6px" class="small">Gamepad polled each frame via <code>navigator.getGamepads()</code>.</div>
+        <div class="small">WebHID is optional; use it if your axes/buttons don’t map well.</div>
+      </div>
+
+      <div class="box">
+        <div class="small" style="margin-bottom:6px; color:#a7ffff; font-weight:700;">Calibration (per device)</div>
+        <div style="display:flex; flex-wrap:wrap; gap:6px;">
+          <button id="calStick">Cal Stick XY</button>
+          <button id="calThrottle">Cal Throttle</button>
+          <button id="calRudder">Cal Rudder</button>
+          <button id="calButtons">Cal Trigger/Hat</button>
+        </div>
+        <div class="small" style="margin-top:6px;">Click a Cal button, then move/press the control for ~2.5s.</div>
+      </div>
+    </div>
+
+    <div id="tip">Tip: Calibrate BEFORE entering VR (DOM UI is easiest outside immersive mode).</div>
+    <div id="status"></div>
+  </div>
+
+  <script type="module">
+    import * as THREE from "https://unpkg.com/three@0.182.0/build/three.module.js";
+    import { VRButton } from "https://unpkg.com/three@0.182.0/examples/jsm/webxr/VRButton.js";
+
+    /**********************************************************************
+     * 0) Utilities
+     **********************************************************************/
+    const $ = (id) => document.getElementById(id);
+
+    function clamp(v, a, b) { return Math.min(b, Math.max(a, v)); }
+
+    function applyDeadzone(v, dz) {
+      // Deadzone with re-normalization so full-scale remains reachable
+      const av = Math.abs(v);
+      if (av < dz) return 0;
+      const sign = Math.sign(v);
+      const scaled = (av - dz) / (1 - dz);
+      return sign * clamp(scaled, 0, 1);
+    }
+
+    function normAxis(v, dz, hint = "auto") {
+      // hint: "signed" (-1..1), "unsigned" (0..1), "auto"
+      if (!Number.isFinite(v)) return 0;
+      // If it's already in [-1, 1], keep it signed.
+      // If it looks like [0, 1], keep it unsigned.
+      // For safety, we clamp to [-1,1] or [0,1] after deadzone.
+      if (hint === "unsigned") {
+        const u = clamp(v, 0, 1);
+        // Convert to signed for deadzone math, then back to unsigned
+        const signed = u * 2 - 1;
+        const dzSigned = applyDeadzone(signed, dz);
+        return (dzSigned + 1) * 0.5; // back to 0..1
+      }
+      // "signed" or "auto"
+      const s = clamp(v, -1, 1);
+      return applyDeadzone(s, dz);
+    }
+
+    // Parse "Vendor: #### Product: ####" from Gamepad.id if present
+    function parseVidPidFromGamepadId(id) {
+      // Chrome often uses: "... (Vendor: 044f Product: b10a)"
+      const m = id.match(/Vendor:\s*([0-9a-fA-F]{4}).*Product:\s*([0-9a-fA-F]{4})/);
+      if (!m) return null;
+      return { vendorId: parseInt(m[1], 16), productId: parseInt(m[2], 16) };
+    }
+
+    function hex4(n) { return "0x" + n.toString(16).padStart(4, "0"); }
+    function vidpidKey(vid, pid) { return `${hex4(vid)}:${hex4(pid)}`; }
+
+    /**********************************************************************
+     * 1) Known device "profiles" (IDENTIFICATION + ROLE ONLY)
+     *
+     * Important: We intentionally do NOT hardcode axis/button indices here
+     * because reliable Gamepad API index maps are OS/driver/browser-dependent.
+     * Instead we use calibration to learn per-device mappings.
+     **********************************************************************/
+    const KNOWN_PROFILES = new Map([
+      // X56 (VID/PID verified from public listing) — stick + throttle are separate devices
+      [vidpidKey(0x0738, 0x2221), { label: "X56 Rhino Stick", roleHint: "stick" }],
+      [vidpidKey(0x0738, 0xA221), { label: "X56 Rhino Throttle", roleHint: "throttle" }],
+
+      // Thrustmaster lineup
+      [vidpidKey(0x044f, 0xB10A), { label: "T.16000M FCS", roleHint: "stick" }],
+      [vidpidKey(0x044f, 0xB687), { label: "TWCS Throttle", roleHint: "throttle" }],
+      [vidpidKey(0x044f, 0xB678), { label: "TFRP Rudder Pedals", roleHint: "rudder" }],
+      [vidpidKey(0x044f, 0xB108), { label: "T.Flight HOTAS X", roleHint: "hotas" }],
+
+      // Microsoft SideWinder FFB2
+      [vidpidKey(0x045e, 0x001b), { label: "SideWinder Force Feedback 2", roleHint: "stick" }],
+    ]);
+
+    // Name-only fallback for T.Flight HOTAS One / One (VID/PID not locked here)
+    function nameRoleFallback(name) {
+      const s = (name || "").toLowerCase();
+      if (s.includes("t.flight") && s.includes("hotas") && s.includes("one")) return { label: "T.Flight HOTAS One", roleHint: "hotas" };
+      if (s.includes("x56")) return { label: "X56 (name match)", roleHint: "unknown" };
+      if (s.includes("t.16000")) return { label: "T.16000M (name match)", roleHint: "stick" };
+      if (s.includes("twcs")) return { label: "TWCS (name match)", roleHint: "throttle" };
+      if (s.includes("tfrp")) return { label: "TFRP (name match)", roleHint: "rudder" };
+      if (s.includes("sidewinder") && s.includes("force")) return { label: "SideWinder FFB2 (name match)", roleHint: "stick" };
+      return null;
+    }
+
+    /**********************************************************************
+     * 2) Calibration storage format
+     **********************************************************************/
+    const CAL_KEY = "hotasViz.cal.v1";
+
+    function loadCalStore() {
+      try {
+        const raw = localStorage.getItem(CAL_KEY);
+        return raw ? JSON.parse(raw) : {};
+      } catch {
+        return {};
+      }
+    }
+    function saveCalStore(store) {
+      localStorage.setItem(CAL_KEY, JSON.stringify(store));
+    }
+    function clearCalStore() {
+      localStorage.removeItem(CAL_KEY);
+    }
+
+    // Each device gets a stable key:
+    // - For Gamepad: prefer parsed VID:PID if present, otherwise use its id string
+    // - For WebHID: VID:PID always available
+    function deviceStableKeyForGamepad(gp) {
+      const vp = parseVidPidFromGamepadId(gp.id);
+      if (vp) return `gp:${vidpidKey(vp.vendorId, vp.productId)}`;
+      return `gp:id:${gp.id}`;
+    }
+    function deviceStableKeyForHID(dev) {
+      return `hid:${vidpidKey(dev.vendorId, dev.productId)}`;
+    }
+
+    /**********************************************************************
+     * 3) WebHID report parsing
+     *
+     * We decode input reports by walking the flattened HIDReportItem list
+     * in order. The spec provides reportSize/reportCount/usages/logical min/max,
+     * which is sufficient to read sequential bitfields per reportId.
+     **********************************************************************/
+    class BitReader {
+      constructor(dataView) {
+        this.dv = dataView;
+        this.bitPos = 0;
+      }
+      readBits(nBits) {
+        // Little-endian bit packing (HID report fields are packed LSB-first within bytes)
+        let out = 0;
+        for (let i = 0; i < nBits; i++) {
+          const byteIndex = (this.bitPos >> 3);
+          const bitIndex = (this.bitPos & 7);
+          const byte = this.dv.getUint8(byteIndex);
+          const bit = (byte >> bitIndex) & 1;
+          out |= (bit << i);
+          this.bitPos++;
+        }
+        return out >>> 0;
+      }
+      alignToByte() {
+        this.bitPos = (this.bitPos + 7) & ~7;
+      }
+    }
+
+    function signExtend(value, bitWidth) {
+      // Convert unsigned to signed integer given bit width
+      const signBit = 1 << (bitWidth - 1);
+      return (value & signBit) ? (value - (1 << bitWidth)) : value;
+    }
+
+    function decodeHIDReport(reportInfo, dataView) {
+      // Returns a map: usageNumber -> normalized float / integer
+      const out = new Map();
+      const br = new BitReader(dataView);
+
+      for (const item of reportInfo.items) {
+        const fieldBits = item.reportSize;
+        const count = item.reportCount;
+
+        // If item has no usages (allowed by spec), we still need to consume bits.
+        const isRange = !!item.isRange;
+        const usages = item.usages || undefined;
+
+        for (let i = 0; i < count; i++) {
+          const rawBits = br.readBits(fieldBits);
+
+          // Determine usage for this field
+          let usage = null;
+          if (isRange) {
+            // usageMinimum/Maximum are "unsigned long" usages
+            // We map i -> usageMinimum + i
+            usage = (item.usageMinimum ?? 0) + i;
+          } else if (usages && usages.length > 0) {
+            usage = usages[Math.min(i, usages.length - 1)];
+          } else {
+            usage = null;
+          }
+
+          // Interpret value
+          let v = rawBits;
+          // Most analog axes are signed or unsigned; we infer signed if logicalMinimum < 0.
+          const logicalMin = item.logicalMinimum ?? 0;
+          const logicalMax = item.logicalMaximum ?? ((1 << fieldBits) - 1);
+
+          // If logicalMin is negative, treat as signed integer
+          if (logicalMin < 0) {
+            v = signExtend(rawBits, fieldBits);
+          }
+
+          // Normalize analog-ish fields when possible (non-buffered, non-constant)
+          let normalized = v;
+          if (!item.isBufferedBytes && !item.isConstant && Number.isFinite(logicalMin) && Number.isFinite(logicalMax) && logicalMax !== logicalMin) {
+            normalized = (v - logicalMin) / (logicalMax - logicalMin); // 0..1
+            normalized = clamp(normalized, -1, 2); // allow a little headroom for odd descriptors
+          }
+
+          if (usage != null) {
+            // Store both normalized (float) and raw in a tuple-like object
+            out.set(usage, { raw: v, norm01: normalized, meta: item });
+          }
+        }
+      }
+      return out;
+    }
+
+    function usageToPageId(usageULong) {
+      const page = (usageULong >>> 16) & 0xffff;
+      const id = usageULong & 0xffff;
+      return { page, id };
+    }
+
+    function usageLabel(usageULong) {
+      const { page, id } = usageToPageId(usageULong);
+      // Common pages for flight controls:
+      // 0x01 = Generic Desktop (X/Y/Z/Rx/Ry/Rz/Slider/Dial/Wheel/Hat switch)
+      // 0x09 = Button
+      if (page === 0x01) {
+        const map = new Map([
+          [0x30, "X"], [0x31, "Y"], [0x32, "Z"],
+          [0x33, "Rx"], [0x34, "Ry"], [0x35, "Rz"],
+          [0x36, "Slider"], [0x37, "Dial"], [0x38, "Wheel"],
+          [0x39, "HatSwitch"],
+        ]);
+        return `GD:${map.get(id) || ("0x" + id.toString(16))}`;
+      }
+      if (page === 0x09) return `Btn:${id}`;
+      return `U:${hex4(page)}:${hex4(id)}`;
+    }
+
+    /**********************************************************************
+     * 4) Three.js scene setup (high-performance, no external assets)
+     **********************************************************************/
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: "high-performance" });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.xr.enabled = true;
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    document.body.appendChild(renderer.domElement);
+
+    // VR entry
+    const vrBtn = VRButton.createButton(renderer);
+    vrBtn.style.marginLeft = "0px";
+    vrBtn.style.borderRadius = "9px";
+    vrBtn.style.border = "1px solid rgba(0,255,255,0.35)";
+    vrBtn.style.background = "rgba(0,255,255,0.10)";
+    vrBtn.style.color = "#d9fbff";
+    vrBtn.style.fontWeight = "700";
+    vrBtn.style.cursor = "pointer";
+    $("row")?.appendChild(vrBtn);
+
+    // If UI row doesn't exist (should), fallback:
+    const row = document.querySelector("#row");
+    if (row) row.insertBefore(vrBtn, row.firstChild);
+
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x05060a, 0.09);
+    scene.background = new THREE.Color(0x05060a);
+
+    const camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.01, 100);
+    camera.position.set(0, 1.35, 1.8);
+
+    // Lighting: keep it cheap
+    scene.add(new THREE.AmbientLight(0x88aaff, 0.25));
+
+    const keyLight = new THREE.DirectionalLight(0x99ffff, 0.55);
+    keyLight.position.set(2.5, 3.2, 1.5);
+    scene.add(keyLight);
+
+    const rim = new THREE.PointLight(0x00ffff, 0.6, 8, 2);
+    rim.position.set(-1.8, 1.6, -1.2);
+    scene.add(rim);
+
+    // Root "rig" group: we recenter by moving/rotating this.
+    const rig = new THREE.Group();
+    rig.position.set(0, 1.10, 0); // seated-friendly height: ~1.1m
+    scene.add(rig);
+
+    // Cyber floor grid
+    const grid = new THREE.GridHelper(10, 80, 0x00ffff, 0x004a4a);
+    grid.position.y = -1.10; // so it appears below seated rig
+    grid.material.opacity = 0.35;
+    grid.material.transparent = true;
+    scene.add(grid);
+
+    // Neon materials
+    function neonMat(colorHex, emissiveIntensity = 1.2, metalness = 0.2, roughness = 0.25) {
+      return new THREE.MeshStandardMaterial({
+        color: new THREE.Color(colorHex),
+        emissive: new THREE.Color(colorHex),
+        emissiveIntensity,
+        metalness,
+        roughness
+      });
+    }
+    const matCyan = neonMat(0x00ffff, 1.25);
+    const matMag  = neonMat(0xff00ff, 1.15);
+    const matBlue = neonMat(0x2aa3ff, 1.05);
+    const matDark = new THREE.MeshStandardMaterial({ color: 0x0a0d14, metalness: 0.4, roughness: 0.6, emissive: new THREE.Color(0x00161a), emissiveIntensity: 0.6 });
+
+    /**********************************************************************
+     * 5) 3D Models (primitives only)
+     **********************************************************************/
+    const models = {
+      stick: new THREE.Group(),
+      throttle: new THREE.Group(),
+      pedals: new THREE.Group(),
+      hud: new THREE.Group(),
+    };
+
+    rig.add(models.stick, models.throttle, models.pedals, models.hud);
+
+    // Layout
+    models.stick.position.set(-0.45, 0.0, -0.25);
+    models.throttle.position.set(0.45, 0.0, -0.25);
+    models.pedals.position.set(0.0, -0.55, -0.60); // below and forward
+    models.hud.position.set(0.0, 0.25, -0.55); // floating HUD in front
+
+    // Flight Stick
+    const stickBase = new THREE.Mesh(new THREE.CylinderGeometry(0.10, 0.14, 0.06, 24), matDark);
+    stickBase.position.y = 0.03;
+    models.stick.add(stickBase);
+
+    const stickGimbal = new THREE.Mesh(new THREE.CylinderGeometry(0.085, 0.09, 0.02, 24), matCyan);
+    stickGimbal.position.y = 0.07;
+    models.stick.add(stickGimbal);
+
+    // Pivot for shaft tilt
+    const stickPivot = new THREE.Group();
+    stickPivot.position.y = 0.08;
+    models.stick.add(stickPivot);
+
+    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.035, 0.28, 18), matBlue);
+    shaft.position.y = 0.14;
+    stickPivot.add(shaft);
+
+    const grip = new THREE.Mesh(new THREE.SphereGeometry(0.07, 22, 18), matMag);
+    grip.position.y = 0.28;
+    stickPivot.add(grip);
+
+    // Trigger: small block that moves slightly + changes emissive when pressed
+    const trigger = new THREE.Mesh(new THREE.BoxGeometry(0.018, 0.030, 0.050), neonMat(0x00ff6a, 0.9));
+    trigger.position.set(0.055, 0.27, 0.02);
+    stickPivot.add(trigger);
+
+    // Hat switch: small cap, color changes with hat direction / press
+    const hat = new THREE.Mesh(new THREE.CylinderGeometry(0.016, 0.020, 0.014, 12), neonMat(0xffaa00, 0.85));
+    hat.position.set(-0.02, 0.33, -0.01);
+    stickPivot.add(hat);
+
+    // Throttle
+    const throttleBase = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.05, 0.12), matDark);
+    throttleBase.position.y = 0.025;
+    models.throttle.add(throttleBase);
+
+    const rail = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.015, 0.03), matCyan);
+    rail.position.set(0, 0.055, 0);
+    models.throttle.add(rail);
+
+    const throttleSlider = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.05, 0.06), matMag);
+    throttleSlider.position.set(-0.10, 0.085, 0); // will slide along X
+    models.throttle.add(throttleSlider);
+
+    // Rudder Pedals
+    const pedalFrame = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.03, 0.22), matDark);
+    pedalFrame.position.y = 0.015;
+    models.pedals.add(pedalFrame);
+
+    const leftPedal = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.03, 0.16), matCyan);
+    const rightPedal = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.03, 0.16), matCyan);
+    leftPedal.position.set(-0.16, 0.035, 0.00);
+    rightPedal.position.set(0.16, 0.035, 0.00);
+    models.pedals.add(leftPedal, rightPedal);
+
+    const pedalNeon = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.006, 0.24), neonMat(0x00ffff, 0.5, 0.0, 0.2));
+    pedalNeon.position.set(0, 0.002, 0);
+    models.pedals.add(pedalNeon);
+
+    /**********************************************************************
+     * 6) HUD (CanvasTexture on a plane) - raw data per device
+     **********************************************************************/
+    const hudCanvas = document.createElement("canvas");
+    hudCanvas.width = 1024;
+    hudCanvas.height = 1024;
+    const hudCtx = hudCanvas.getContext("2d");
+    const hudTex = new THREE.CanvasTexture(hudCanvas);
+    hudTex.colorSpace = THREE.SRGBColorSpace;
+
+    const hudMat = new THREE.MeshBasicMaterial({
+      map: hudTex,
+      transparent: true,
+      opacity: 0.95,
+      side: THREE.DoubleSide
+    });
+
+    const hudPlane = new THREE.Mesh(new THREE.PlaneGeometry(0.55, 0.55), hudMat);
+    hudPlane.position.set(0, 0.12, 0);
+    models.hud.add(hudPlane);
+
+    // HUD "glass" outline
+    const hudOutline = new THREE.Mesh(
+      new THREE.RingGeometry(0.27, 0.285, 64),
+      neonMat(0x00ffff, 0.8, 0.0, 0.2)
+    );
+    hudOutline.position.copy(hudPlane.position);
+    hudOutline.rotation.y = Math.PI;
+    models.hud.add(hudOutline);
+
+    models.hud.lookAt(new THREE.Vector3(0, 1.10, -1.5)); // generally face user
+
+    function drawHUD(lines) {
+      hudCtx.clearRect(0, 0, hudCanvas.width, hudCanvas.height);
+      // Background
+      hudCtx.fillStyle = "rgba(0, 6, 10, 0.75)";
+      hudCtx.fillRect(0, 0, hudCanvas.width, hudCanvas.height);
+
+      // Grid lines
+      hudCtx.strokeStyle = "rgba(0, 255, 255, 0.12)";
+      hudCtx.lineWidth = 2;
+      for (let y = 0; y <= 1024; y += 64) {
+        hudCtx.beginPath(); hudCtx.moveTo(0, y); hudCtx.lineTo(1024, y); hudCtx.stroke();
+      }
+      for (let x = 0; x <= 1024; x += 64) {
+        hudCtx.beginPath(); hudCtx.moveTo(x, 0); hudCtx.lineTo(x, 1024); hudCtx.stroke();
+      }
+
+      hudCtx.font = "24px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+      hudCtx.fillStyle = "rgba(185, 255, 255, 0.95)";
+      hudCtx.fillText("DEVICE HUD (raw)", 26, 46);
+
+      hudCtx.font = "20px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+      let y = 86;
+      for (const line of lines) {
+        hudCtx.fillStyle = line.startsWith("!") ? "rgba(255, 140, 140, 0.95)" : "rgba(200, 255, 255, 0.92)";
+        hudCtx.fillText(line.slice(0, 90), 26, y);
+        y += 26;
+        if (y > 980) break;
+      }
+
+      hudTex.needsUpdate = true;
+    }
+
+    /**********************************************************************
+     * 7) Input device state: Gamepad + WebHID
+     **********************************************************************/
+    const state = {
+      deadzone: 0.05,
+      log: [],
+      gamepads: new Map(), // key -> device object
+      hid: new Map(),      // key -> device object
+      calStore: loadCalStore(),
+      // Controls that drive the 3D objects
+      channels: {
+        stickX: 0, stickY: 0,
+        throttle: 0,        // 0..1
+        rudder: 0,          // -1..1
+        trigger: 0,         // 0..1
+        hatX: 0, hatY: 0    // -1/0/1
+      },
+      // Calibration in progress
+      cal: {
+        active: false,
+        mode: null, // "stick" | "throttle" | "rudder" | "buttons"
+        startedAt: 0,
+        durationMs: 2500,
+        samples: new Map(), // signalKey -> { min, max, sum, sum2, n }
+        targetDeviceKey: null, // optional: if user wants to calibrate a specific device (we auto-pick "best" below)
+      },
+      lastHudUpdate: 0
+    };
+
+    function log(msg) {
+      const t = new Date().toLocaleTimeString();
+      state.log.push(`[${t}] ${msg}`);
+      if (state.log.length > 120) state.log.shift();
+      updateStatus();
+    }
+
+    function updateStatus() {
+      const lines = [];
+      lines.push(`Deadzone: ${state.deadzone.toFixed(3)} | Gamepads: ${state.gamepads.size} | HID: ${state.hid.size}`);
+      if (state.cal.active) lines.push(`CALIBRATING: ${state.cal.mode.toUpperCase()} (${Math.max(0, state.cal.durationMs - (performance.now() - state.cal.startedAt)).toFixed(0)}ms left)`);
+      lines.push("");
+      lines.push(...state.log.slice(-10));
+      $("status").textContent = lines.join("\n");
+    }
+
+    // Build "signal list" each frame for calibration + mapping:
+    // - Gamepad axes: gp:<devKey>:a<index>
+    // - Gamepad buttons: gp:<devKey>:b<index> (value 0..1)
+    // - HID usages: hid:<devKey>:u<usageULong> (value 0..1 or raw-ish)
+    function addSample(sigKey, v) {
+      let s = state.cal.samples.get(sigKey);
+      if (!s) {
+        s = { min: v, max: v, sum: 0, sum2: 0, n: 0 };
+        state.cal.samples.set(sigKey, s);
+      }
+      s.min = Math.min(s.min, v);
+      s.max = Math.max(s.max, v);
+      s.sum += v;
+      s.sum2 += v * v;
+      s.n++;
+    }
+
+    function varianceOf(s) {
+      if (!s || s.n < 2) return 0;
+      const mean = s.sum / s.n;
+      return (s.sum2 / s.n) - mean * mean;
+    }
+
+    function pickTopSignals(prefix, count = 1, minRange = 0.12) {
+      // pick by range then variance
+      const candidates = [];
+      for (const [k, s] of state.cal.samples.entries()) {
+        if (!k.startsWith(prefix)) continue;
+        const range = s.max - s.min;
+        const varr = varianceOf(s);
+        if (range >= minRange) candidates.push({ k, range, varr });
+      }
+      candidates.sort((a, b) => (b.range - a.range) || (b.varr - a.varr));
+      return candidates.slice(0, count);
+    }
+
+    // Save mapping to calStore for a device
+    function saveDeviceMapping(deviceKey, mapping) {
+      state.calStore[deviceKey] = mapping;
+      saveCalStore(state.calStore);
+      log(`Saved calibration for ${deviceKey}`);
+    }
+
+    /**********************************************************************
+     * 8) Mapping strategy
+     *
+     * - If a device has saved calibration, use it.
+     * - Otherwise: show raw data in HUD, allow calibration.
+     *
+     * The “roles” are resolved by:
+     * - Profile VID/PID (best)
+     * - Name-based fallback
+     **********************************************************************/
+    function resolveProfileFromVidPid(vid, pid) {
+      const key = vidpidKey(vid, pid);
+      return KNOWN_PROFILES.get(key) || null;
+    }
+
+    function resolveRoleForGamepad(gp) {
+      const vp = parseVidPidFromGamepadId(gp.id);
+      if (vp) {
+        const prof = resolveProfileFromVidPid(vp.vendorId, vp.productId);
+        if (prof) return { ...prof, vidpid: vidpidKey(vp.vendorId, vp.productId) };
+        return { label: "Unknown (VID/PID)", roleHint: "unknown", vidpid: vidpidKey(vp.vendorId, vp.productId) };
+      }
+      const fallback = nameRoleFallback(gp.id);
+      if (fallback) return { ...fallback, vidpid: null };
+      return { label: "Unknown", roleHint: "unknown", vidpid: null };
+    }
+
+    function resolveRoleForHID(dev) {
+      const prof = resolveProfileFromVidPid(dev.vendorId, dev.productId);
+      if (prof) return { ...prof, vidpid: vidpidKey(dev.vendorId, dev.productId) };
+      const fallback = nameRoleFallback(dev.productName);
+      if (fallback) return { ...fallback, vidpid: vidpidKey(dev.vendorId, dev.productId) };
+      return { label: "Unknown HID", roleHint: "unknown", vidpid: vidpidKey(dev.vendorId, dev.productId) };
+    }
+
+    // Choose which device drives which channel:
+    // - stickX/stickY/trigger/hat from a "stick" or "hotas" device
+    // - throttle from "throttle" or "hotas"
+    // - rudder from "rudder" or sometimes "stick"/"hotas" if that’s what exists
+    function pickDeviceByRole(roleHints) {
+      // Prefer calibrated devices, then HID devices, then gamepads
+      const scored = [];
+
+      for (const [k, d] of state.hid.entries()) {
+        const role = d.role?.roleHint || "unknown";
+        if (!roleHints.includes(role)) continue;
+        const hasCal = !!state.calStore[d.key];
+        scored.push({ source: "hid", d, score: (hasCal ? 100 : 10) + 5 });
+      }
+      for (const [k, d] of state.gamepads.entries()) {
+        const role = d.role?.roleHint || "unknown";
+        if (!roleHints.includes(role)) continue;
+        const hasCal = !!state.calStore[d.key];
+        scored.push({ source: "gp", d, score: (hasCal ? 90 : 5) });
+      }
+
+      scored.sort((a, b) => b.score - a.score);
+      return scored.length ? scored[0] : null;
+    }
+
+    /**********************************************************************
+     * 9) WebHID wiring
+     **********************************************************************/
+    async function requestHID() {
+      if (!("hid" in navigator)) {
+        log("WebHID not supported in this browser context.");
+        return;
+      }
+      try {
+        const devices = await navigator.hid.requestDevice({ filters: [] });
+        if (!devices.length) {
+          log("No HID device selected.");
+          return;
+        }
+        for (const dev of devices) {
+          await openHIDDevice(dev);
+        }
+      } catch (e) {
+        log(`WebHID request failed: ${e?.message || e}`);
+      }
+    }
+
+    async function openHIDDevice(dev) {
+      const key = deviceStableKeyForHID(dev);
+      if (state.hid.has(key)) {
+        log(`HID already open: ${key}`);
+        return;
+      }
+      try {
+        if (!dev.opened) await dev.open();
+        const role = resolveRoleForHID(dev);
+
+        // Build report layouts per reportId
+        const reportMap = new Map(); // reportId -> HIDReportInfo {reportId, items[]}
+        for (const col of dev.collections) {
+          for (const rep of col.inputReports) {
+            // If multiple collections define same reportId, we append items (should remain in descriptor order per spec flattening)
+            const existing = reportMap.get(rep.reportId);
+            if (!existing) reportMap.set(rep.reportId, { reportId: rep.reportId, items: [...rep.items] });
+            else existing.items.push(...rep.items);
+          }
+        }
+
+        const d = {
+          kind: "hid",
+          key,
+          dev,
+          role,
+          reportMap,
+          lastUsages: new Map(), // usageULong -> {raw, norm01, meta}
+          lastSeen: performance.now()
+        };
+
+        dev.addEventListener("inputreport", (ev) => {
+          try {
+            const rep = d.reportMap.get(ev.reportId);
+            if (!rep) return;
+            const decoded = decodeHIDReport(rep, ev.data);
+            d.lastUsages = decoded;
+            d.lastSeen = performance.now();
+          } catch (e) {
+            // Avoid spamming; log occasionally
+            log(`HID decode error (${key}): ${e?.message || e}`);
+          }
+        });
+
+        state.hid.set(key, d);
+        log(`HID opened: ${role.label} (${vidpidKey(dev.vendorId, dev.productId)})`);
+      } catch (e) {
+        log(`Failed to open HID device: ${e?.message || e}`);
+      }
+    }
+
+    if ("hid" in navigator) {
+      navigator.hid.addEventListener("connect", (e) => {
+        // Device became available; we do not auto-open without user gesture
+        log(`HID device connected: ${e.device.productName} (${vidpidKey(e.device.vendorId, e.device.productId)})`);
+      });
+      navigator.hid.addEventListener("disconnect", (e) => {
+        const key = deviceStableKeyForHID(e.device);
+        if (state.hid.has(key)) {
+          state.hid.delete(key);
+          log(`HID disconnected: ${key}`);
+        }
+      });
+      // Re-open previously granted devices (no chooser)
+      navigator.hid.getDevices().then(async (devs) => {
+        for (const d of devs) await openHIDDevice(d);
+      }).catch(() => {});
+    }
+
+    /**********************************************************************
+     * 10) Gamepad wiring
+     **********************************************************************/
+    window.addEventListener("gamepadconnected", (e) => {
+      const gp = e.gamepad;
+      const key = deviceStableKeyForGamepad(gp);
+      log(`Gamepad connected: ${gp.id} (index ${gp.index})`);
+      // Will be fully tracked in the per-frame poll.
+    });
+    window.addEventListener("gamepaddisconnected", (e) => {
+      const gp = e.gamepad;
+      // Remove by scanning keys that match this index or id
+      for (const [k, d] of state.gamepads.entries()) {
+        if (d.index === gp.index || d.id === gp.id) {
+          state.gamepads.delete(k);
+          log(`Gamepad disconnected: ${d.key}`);
+        }
+      }
+    });
+
+    function pollGamepads() {
+      const gps = navigator.getGamepads ? navigator.getGamepads() : [];
+      for (const gp of gps) {
+        if (!gp) continue;
+        const key = deviceStableKeyForGamepad(gp);
+        const role = resolveRoleForGamepad(gp);
+
+        const existing = state.gamepads.get(key);
+        if (!existing) {
+          state.gamepads.set(key, {
+            kind: "gp",
+            key,
+            index: gp.index,
+            id: gp.id,
+            role,
+            last: gp,
+            lastSeen: performance.now()
+          });
+        } else {
+          existing.last = gp;
+          existing.lastSeen = performance.now();
+        }
+      }
+
+      // Drop stale gamepads (e.g. unplugged without event)
+      const now = performance.now();
+      for (const [k, d] of state.gamepads.entries()) {
+        if (now - d.lastSeen > 2000) {
+          state.gamepads.delete(k);
+          log(`Gamepad stale removed: ${k}`);
+        }
+      }
+    }
+
+    /**********************************************************************
+     * 11) Calibration workflow
+     **********************************************************************/
+    function startCal(mode) {
+      state.cal.active = true;
+      state.cal.mode = mode;
+      state.cal.startedAt = performance.now();
+      state.cal.samples.clear();
+      state.cal.targetDeviceKey = null;
+      log(`Calibration started: ${mode.toUpperCase()} — move/press now`);
+    }
+
+    function endCal() {
+      state.cal.active = false;
+      const mode = state.cal.mode;
+      state.cal.mode = null;
+
+      // Pick likely “driver” device for this mode
+      const stickPick = pickDeviceByRole(["stick", "hotas"]);
+      const thrPick   = pickDeviceByRole(["throttle", "hotas"]);
+      const rudPick   = pickDeviceByRole(["rudder", "hotas", "stick"]);
+      const btnPick   = pickDeviceByRole(["stick", "hotas"]);
+
+      const pick = (mode === "stick") ? stickPick
+                : (mode === "throttle") ? thrPick
+                : (mode === "rudder") ? rudPick
+                : (mode === "buttons") ? btnPick
+                : null;
+
+      if (!pick) {
+        log(`! Calibration failed: no suitable device found for ${mode}`);
+        return;
+      }
+
+      const devKey = pick.d.key;
+      const existing = state.calStore[devKey] || { version: 1, deviceKey: devKey, source: pick.source };
+
+      // For gamepads we store axis/button indices; for HID we store usages.
+      if (mode === "stick") {
+        // Choose top-2 varying signals for this device among analog candidates
+        const prefix = `${pick.source}:${devKey}:`;
+        // For GP: signals are gp:<devKey>:a#
+        // For HID: signals are hid:<devKey>:u<usage>
+        const top = pickTopSignals(prefix, 2, 0.18);
+        if (top.length < 2) {
+          log(`! Stick calibration: insufficient movement detected.`);
+          return;
+        }
+        existing.stickX = top[0].k;
+        existing.stickY = top[1].k;
+        log(`Stick mapped: X=${top[0].k.split(":").slice(-1)[0]} Y=${top[1].k.split(":").slice(-1)[0]}`);
+      } else if (mode === "throttle") {
+        const prefix = `${pick.source}:${devKey}:`;
+        const top = pickTopSignals(prefix, 1, 0.18);
+        if (!top.length) {
+          log(`! Throttle calibration: insufficient movement detected.`);
+          return;
+        }
+        existing.throttle = top[0].k;
+        log(`Throttle mapped: ${top[0].k.split(":").slice(-1)[0]}`);
+      } else if (mode === "rudder") {
+        const prefix = `${pick.source}:${devKey}:`;
+        const top = pickTopSignals(prefix, 1, 0.18);
+        if (!top.length) {
+          log(`! Rudder calibration: insufficient movement detected.`);
+          return;
+        }
+        existing.rudder = top[0].k;
+        log(`Rudder mapped: ${top[0].k.split(":").slice(-1)[0]}`);
+      } else if (mode === "buttons") {
+        // For buttons: find most-changed (range) among button signals
+        const prefix = `${pick.source}:${devKey}:`;
+        const candidates = [];
+        for (const [k, s] of state.cal.samples.entries()) {
+          if (!k.startsWith(prefix)) continue;
+          // Prefer button-ish signals:
+          const tail = k.split(":").slice(-1)[0];
+          const isBtn = tail.startsWith("b") || tail.startsWith("u"); // HID buttons are usages on Button page
+          if (!isBtn) continue;
+          const range = s.max - s.min;
+          if (range > 0.5) candidates.push({ k, range });
+        }
+        candidates.sort((a,b) => b.range - a.range);
+        if (!candidates.length) {
+          log(`! Trigger/Hat calibration: no strong button press detected.`);
+          return;
+        }
+        // Trigger = strongest button
+        existing.trigger = candidates[0].k;
+
+        // Hat: for gamepads we try to infer dpad from 4 digital buttons (range > 0.5) after trigger,
+        // or for HID we look for "HatSwitch" usage if present (but we didn’t decode semantics here).
+        // We'll store a set of 4 dpad buttons if available.
+        const dpad = candidates.slice(1, 6).map(c => c.k);
+        existing.dpadCandidates = dpad;
+
+        log(`Trigger mapped: ${candidates[0].k.split(":").slice(-1)[0]}`);
+      }
+
+      saveDeviceMapping(devKey, existing);
+      updateStatus();
+    }
+
+    function updateCalibrationSampling() {
+      if (!state.cal.active) return;
+      const now = performance.now();
+      if (now - state.cal.startedAt > state.cal.durationMs) {
+        endCal();
+        return;
+      }
+
+      // Sample all current signals (GP axes/buttons, HID usages)
+      for (const [k, d] of state.gamepads.entries()) {
+        const gp = d.last;
+        if (!gp) continue;
+
+        // Axes
+        for (let i = 0; i < gp.axes.length; i++) {
+          const v = clamp(gp.axes[i], -1, 1);
+          addSample(`gp:${d.key}:a${i}`, v);
+        }
+        // Buttons (value 0..1)
+        for (let i = 0; i < gp.buttons.length; i++) {
+          const v = clamp(gp.buttons[i]?.value ?? 0, 0, 1);
+          addSample(`gp:${d.key}:b${i}`, v);
+        }
+      }
+
+      for (const [k, d] of state.hid.entries()) {
+        // Use normalized 0..1 for analog-ish fields, raw for buttons if needed
+        for (const [usageUL, obj] of d.lastUsages.entries()) {
+          // Prefer numeric normalization when it looks valid
+          const v = (obj && Number.isFinite(obj.norm01)) ? obj.norm01 : 0;
+          addSample(`hid:${d.key}:u${usageUL}`, v);
+        }
+      }
+    }
+
+    /**********************************************************************
+     * 12) Read a mapped signal value (from saved calibration)
+     **********************************************************************/
+    function readSignal(sigKey) {
+      // sigKey formats:
+      // "gp:<devKey>:a#"  -> axis (signed)
+      // "gp:<devKey>:b#"  -> button (0..1)
+      // "hid:<devKey>:u<usageULong>" -> usage value (0..1)
+      const parts = sigKey.split(":");
+      const kind = parts[0];
+      if (kind === "gp") {
+        const devKey = parts[1] + ":" + parts[2]; // devKey itself contains ':', because we stored like "gp:0x....:0x...."
+        const tail = parts[3]; // a# or b#
+        // Rebuild the exact key as stored in state maps
+        const fullDevKey = `gp:${parts[1]}:${parts[2]}`;
+        const dev = state.gamepads.get(fullDevKey);
+        if (!dev || !dev.last) return 0;
+        const gp = dev.last;
+        if (tail.startsWith("a")) {
+          const idx = parseInt(tail.slice(1), 10);
+          return clamp(gp.axes[idx] ?? 0, -1, 1);
+        }
+        if (tail.startsWith("b")) {
+          const idx = parseInt(tail.slice(1), 10);
+          return clamp(gp.buttons[idx]?.value ?? 0, 0, 1);
+        }
+      } else if (kind === "hid") {
+        const fullDevKey = `hid:${parts[1]}:${parts[2]}`;
+        const dev = state.hid.get(fullDevKey);
+        if (!dev) return 0;
+        const tail = parts[3]; // u###
+        if (tail.startsWith("u")) {
+          const usage = parseInt(tail.slice(1), 10);
+          const obj = dev.lastUsages.get(usage);
+          return obj?.norm01 ?? 0;
+        }
+      }
+      return 0;
+    }
+
+    /**********************************************************************
+     * 13) Drive channels from mapped devices
+     **********************************************************************/
+    function updateChannels() {
+      const dz = state.deadzone;
+
+      // Resolve which devices should drive which subsystem
+      const stickDev = pickDeviceByRole(["stick", "hotas"]);
+      const thrDev   = pickDeviceByRole(["throttle", "hotas"]);
+      const rudDev   = pickDeviceByRole(["rudder", "hotas", "stick"]);
+
+      // Default zero
+      state.channels.stickX = 0;
+      state.channels.stickY = 0;
+      state.channels.throttle = 0;
+      state.channels.rudder = 0;
+      state.channels.trigger = 0;
+      state.channels.hatX = 0;
+      state.channels.hatY = 0;
+
+      // Helper: read mapping if present
+      function applyMapped(devPick, what) {
+        if (!devPick) return null;
+        const devKey = devPick.d.key;
+        const cal = state.calStore[devKey];
+        if (!cal) return null;
+        return cal[what] || null;
+      }
+
+      // Stick
+      if (stickDev) {
+        const devKey = stickDev.d.key;
+        const cal = state.calStore[devKey];
+        if (cal?.stickX && cal?.stickY) {
+          const x = readSignal(cal.stickX);
+          const y = readSignal(cal.stickY);
+          // These are usually signed; if HID norm01, we convert to signed around 0.5
+          const xSigned = (cal.stickX.startsWith("hid:")) ? (x * 2 - 1) : x;
+          const ySigned = (cal.stickY.startsWith("hid:")) ? (y * 2 - 1) : y;
+
+          state.channels.stickX = normAxis(xSigned, dz, "signed");
+          state.channels.stickY = normAxis(ySigned, dz, "signed");
+        }
+        if (cal?.trigger) {
+          const t = readSignal(cal.trigger);
+          // Trigger is typically 0..1 already
+          state.channels.trigger = normAxis(t, 0.0, "unsigned");
+        }
+
+        // Simple Hat/D-Pad approach:
+        // If HID provides HatSwitch, you'd calibrate it as a signal; here we only color/offset based on candidate buttons.
+        // We'll interpret up to 4 “dpadCandidates” as digital buttons; the user can refine later if needed.
+        if (Array.isArray(cal?.dpadCandidates)) {
+          // Heuristic: pick first 4 candidates as up/down/left/right by press order
+          const c = cal.dpadCandidates;
+          const b0 = c[0] ? readSignal(c[0]) : 0;
+          const b1 = c[1] ? readSignal(c[1]) : 0;
+          const b2 = c[2] ? readSignal(c[2]) : 0;
+          const b3 = c[3] ? readSignal(c[3]) : 0;
+          state.channels.hatY = (b0 > 0.5 ? 1 : 0) + (b1 > 0.5 ? -1 : 0);
+          state.channels.hatX = (b2 > 0.5 ? -1 : 0) + (b3 > 0.5 ? 1 : 0);
+        }
+      }
+
+      // Throttle: we want 0..1
+      if (thrDev) {
+        const devKey = thrDev.d.key;
+        const cal = state.calStore[devKey];
+        if (cal?.throttle) {
+          const v = readSignal(cal.throttle);
+          // If this is from GP, could be [-1..1] or [0..1]. If from HID norm01, it's already 0..1.
+          let u = v;
+          if (cal.throttle.startsWith("gp:")) {
+            // Map signed [-1..1] -> [0..1] if it looks signed
+            if (u < -0.01 || u > 1.01) {
+              u = (clamp(u, -1, 1) + 1) * 0.5;
+            } else {
+              // If it already behaves like 0..1, just clamp
+              u = clamp(u, 0, 1);
+            }
+          } else {
+            // HID norm01
+            u = clamp(u, 0, 1);
+          }
+          state.channels.throttle = normAxis(u, 0.0, "unsigned");
+        }
+      }
+
+      // Rudder: we want -1..1
+      if (rudDev) {
+        const devKey = rudDev.d.key;
+        const cal = state.calStore[devKey];
+        if (cal?.rudder) {
+          const v = readSignal(cal.rudder);
+          let s = v;
+          if (cal.rudder.startsWith("hid:")) s = v * 2 - 1; // HID norm01 -> signed
+          state.channels.rudder = normAxis(s, dz, "signed");
+        }
+      }
+    }
+
+    /**********************************************************************
+     * 14) Apply channels to the 3D models
+     **********************************************************************/
+    function applyToModels() {
+      // Stick tilt limits
+      const maxTilt = THREE.MathUtils.degToRad(18);
+      stickPivot.rotation.x = -state.channels.stickY * maxTilt;
+      stickPivot.rotation.z = -state.channels.stickX * maxTilt;
+
+      // Trigger: move and glow when pressed
+      const t = clamp(state.channels.trigger, 0, 1);
+      trigger.position.z = 0.02 + t * 0.010;
+      trigger.material.emissiveIntensity = 0.9 + t * 1.8;
+
+      // Hat: color and slight offset based on hatX/hatY
+      const hx = clamp(state.channels.hatX, -1, 1);
+      const hy = clamp(state.channels.hatY, -1, 1);
+      hat.position.x = -0.02 + hx * 0.006;
+      hat.position.z = -0.01 + hy * 0.006;
+      hat.material.emissiveIntensity = (Math.abs(hx) + Math.abs(hy)) > 0 ? 1.8 : 0.85;
+
+      // Throttle slider along X
+      const u = clamp(state.channels.throttle, 0, 1);
+      const railMin = -0.10;
+      const railMax = 0.10;
+      throttleSlider.position.x = THREE.MathUtils.lerp(railMin, railMax, u);
+
+      // Pedals slide in opposition along Z
+      const r = clamp(state.channels.rudder, -1, 1);
+      const travel = 0.045;
+      leftPedal.position.z = r * travel;
+      rightPedal.position.z = -r * travel;
+
+      // Pedal emissive response
+      leftPedal.material.emissiveIntensity = 0.85 + Math.abs(r) * 0.8;
+      rightPedal.material.emissiveIntensity = 0.85 + Math.abs(r) * 0.8;
+    }
+
+    /**********************************************************************
+     * 15) Recenter (align rig to current view)
+     **********************************************************************/
+    function recenter() {
+      // In immersive XR, use XR camera; otherwise use normal camera.
+      const cam = renderer.xr.isPresenting ? renderer.xr.getCamera(camera) : camera;
+
+      // Compute yaw-only rotation so the rig faces where the user faces
+      const q = new THREE.Quaternion();
+      cam.getWorldQuaternion(q);
+      const e = new THREE.Euler().setFromQuaternion(q, "YXZ");
+      const yaw = e.y;
+
+      // Place rig in front of user at a desk-friendly distance
+      const p = new THREE.Vector3();
+      cam.getWorldPosition(p);
+
+      // Keep rig's Y near seated height
+      rig.position.y = 1.10;
+
+      // Place rig origin at user's XZ, then shift forward slightly
+      rig.position.x = p.x;
+      rig.position.z = p.z;
+
+      // Rotate rig so its -Z faces user's forward direction
+      rig.rotation.set(0, yaw, 0);
+
+      // Nudge rig slightly forward so the hardware sits on “desk” in view
+      const forward = new THREE.Vector3(0, 0, -1).applyAxisAngle(new THREE.Vector3(0,1,0), yaw);
+      rig.position.addScaledVector(forward, 0.70);
+
+      log("Re-centered rig to current view.");
+    }
+
+    /**********************************************************************
+     * 16) HUD composition
+     **********************************************************************/
+    function buildHUDLines() {
+      const lines = [];
+      lines.push(`Channels: stickX=${state.channels.stickX.toFixed(2)} stickY=${state.channels.stickY.toFixed(2)} thr=${state.channels.throttle.toFixed(2)} rud=${state.channels.rudder.toFixed(2)} trig=${state.channels.trigger.toFixed(2)}`);
+
+      // Gamepads
+      for (const [k, d] of state.gamepads.entries()) {
+        const gp = d.last;
+        if (!gp) continue;
+        const vp = parseVidPidFromGamepadId(gp.id);
+        const vpStr = vp ? `${hex4(vp.vendorId)}:${hex4(vp.productId)}` : "VID:PID ?";
+        const cal = state.calStore[d.key] ? "CAL✓" : "CAL✗";
+        lines.push(``);
+        lines.push(`GP ${d.role.label} | ${vpStr} | ${cal}`);
+        lines.push(`  id: ${gp.id.slice(0, 60)}`);
+
+        const axes = gp.axes.map((v,i)=>`a${i}=${(v??0).toFixed(2)}`).join(" ");
+        lines.push(`  axes: ${axes}`.slice(0, 92));
+
+        const btns = gp.buttons.map((b,i)=>`b${i}=${(b?.value??0).toFixed(2)}`).slice(0, 12).join(" ");
+        lines.push(`  btns: ${btns}`.slice(0, 92));
+
+        if (!state.calStore[d.key]) lines.push(`! Not calibrated: click Cal buttons above.`);
+      }
+
+      // HID
+      for (const [k, d] of state.hid.entries()) {
+        const dev = d.dev;
+        const cal = state.calStore[d.key] ? "CAL✓" : "CAL✗";
+        lines.push(``);
+        lines.push(`HID ${d.role.label} | ${hex4(dev.vendorId)}:${hex4(dev.productId)} | ${cal}`);
+        lines.push(`  name: ${(dev.productName || "").slice(0, 70)}`);
+
+        // Show a small subset of usages (first N)
+        const usagePairs = [];
+        let n = 0;
+        for (const [u, obj] of d.lastUsages.entries()) {
+          const lab = usageLabel(u);
+          const val = (obj?.norm01 ?? 0);
+          usagePairs.push(`${lab}=${val.toFixed(2)}`);
+          if (++n >= 10) break;
+        }
+        if (usagePairs.length) lines.push(`  usages: ${usagePairs.join(" ")}`.slice(0, 92));
+        if (!state.calStore[d.key]) lines.push(`! Not calibrated: click Cal buttons above.`);
+      }
+
+      if (state.gamepads.size === 0 && state.hid.size === 0) {
+        lines.push("");
+        lines.push("! No devices detected yet. Plug in your HOTAS/pedals.");
+      }
+
+      return lines;
+    }
+
+    /**********************************************************************
+     * 17) Main loop (renderer.setAnimationLoop => headset refresh rate)
+     **********************************************************************/
+    function tick(t) {
+      pollGamepads();
+      updateCalibrationSampling();
+      updateChannels();
+      applyToModels();
+
+      // Update HUD at ~6Hz to reduce CPU overhead
+      const now = performance.now();
+      if (now - state.lastHudUpdate > 160) {
+        drawHUD(buildHUDLines());
+        state.lastHudUpdate = now;
+      }
+
+      renderer.render(scene, camera);
+    }
+
+    renderer.setAnimationLoop(tick);
+
+    /**********************************************************************
+     * 18) UI events
+     **********************************************************************/
+    $("btnHID").addEventListener("click", requestHID);
+    $("btnRecenter").addEventListener("click", recenter);
+    $("btnClearCal").addEventListener("click", () => {
+      clearCalStore();
+      state.calStore = loadCalStore();
+      log("Cleared saved calibration.");
+    });
+
+    $("deadzone").addEventListener("input", (e) => {
+      const v = parseFloat(e.target.value);
+      state.deadzone = v;
+      $("deadzoneVal").textContent = v.toFixed(3);
+    });
+
+    $("calStick").addEventListener("click", () => startCal("stick"));
+    $("calThrottle").addEventListener("click", () => startCal("throttle"));
+    $("calRudder").addEventListener("click", () => startCal("rudder"));
+    $("calButtons").addEventListener("click", () => startCal("buttons"));
+
+    window.addEventListener("resize", () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // Initial HUD + status
+    log("Ready. Plug in your devices, then calibrate.");
+    updateStatus();
+    drawHUD(buildHUDLines());
+  </script>
+</body>
+</html>
