@@ -3,285 +3,594 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WebXR Input Inspector</title>
+    <title>Universal Flight Hardware Calibrator v2</title>
     <style>
         :root {
             --bg: #121212;
             --panel: #1e1e1e;
             --text: #e0e0e0;
             --accent: #00ff9d;
+            --accent-dim: rgba(0, 255, 157, 0.1);
             --warn: #ffb86c;
             --err: #ff5555;
+            --border: #333;
         }
         body {
             background: var(--bg);
             color: var(--text);
-            font-family: 'Courier New', monospace;
+            font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
             margin: 0;
             padding: 20px;
-            font-size: 14px;
+            height: 100vh;
+            box-sizing: border-box;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
         }
-        h1, h2 { margin-top: 0; color: var(--accent); }
-        .container {
+        h1, h2, h3 { margin: 0 0 10px 0; color: var(--accent); letter-spacing: 1px; }
+        
+        /* Header */
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 20px;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 20px;
+        }
+        .btn-group { display: flex; gap: 10px; }
+        button {
+            background: #333;
+            border: 1px solid #555;
+            color: #fff;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: all 0.2s;
+        }
+        button:hover { background: #444; border-color: #777; }
+        button.primary { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
+        button.primary:hover { background: var(--accent); color: #000; }
+        button.danger { border-color: var(--err); color: var(--err); background: rgba(255, 85, 85, 0.1); }
+        button.danger:hover { background: var(--err); color: #fff; }
+
+        /* Main Layout */
+        .workspace {
             display: grid;
-            grid-template-columns: 1fr 1fr;
+            grid-template-columns: 350px 1fr;
             gap: 20px;
-            height: 90vh;
+            flex-grow: 1;
+            overflow: hidden;
         }
+
+        /* Panel Styles */
         .panel {
             background: var(--panel);
-            padding: 15px;
             border-radius: 8px;
+            border: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .panel-header {
+            padding: 15px;
+            background: rgba(255, 255, 255, 0.05);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .panel-content {
+            padding: 15px;
             overflow-y: auto;
-            border: 1px solid #333;
+            flex-grow: 1;
         }
+
+        /* Raw Device Cards (Left Panel) */
         .device-card {
-            background: #2a2a2a;
-            border-left: 4px solid var(--accent);
+            background: #252525;
             padding: 10px;
-            margin-bottom: 15px;
+            border-radius: 6px;
+            margin-bottom: 10px;
+            border-left: 3px solid #666;
+            font-family: monospace;
+            font-size: 11px;
         }
-        .axis-row {
+        
+        /* Mapped Function Rows (Right Panel) */
+        .map-row {
             display: flex;
             align-items: center;
-            margin-bottom: 4px;
+            background: #252525;
+            margin-bottom: 8px;
+            padding: 10px;
+            border-radius: 6px;
+            border: 1px solid transparent;
+            transition: background 0.2s;
         }
-        .axis-label { width: 60px; font-size: 12px; }
-        .axis-track {
-            flex-grow: 1;
-            background: #444;
-            height: 10px;
-            position: relative;
-        }
-        .axis-fill {
-            background: var(--accent);
-            height: 100%;
-            width: 50%; /* center is default */
-            transition: width 0.05s;
-        }
-        .axis-val { width: 50px; text-align: right; font-size: 11px; margin-left: 5px;}
+        .map-row:hover { background: #2a2a2a; }
         
-        .btn-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(30px, 1fr));
-            gap: 5px;
-            margin-top: 10px;
+        .label-col { width: 140px; font-weight: bold; font-size: 13px; }
+        .status-col { width: 150px; font-size: 10px; color: #888; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display:flex; flex-direction:column;}
+        .visual-col { flex-grow: 1; margin: 0 15px; height: 16px; background: #333; border-radius: 3px; position: relative; overflow: hidden; border:1px solid #444;}
+        
+        /* The normalized value bar */
+        .visual-bar { height: 100%; background: var(--accent); width: 0%; transition: width 0.05s; position: absolute; top:0;}
+        /* Center line */
+        .visual-center { position: absolute; left: 50%; width: 1px; height: 100%; background: rgba(255,255,255,0.3); z-index: 5; }
+        
+        .controls-col { display: flex; gap: 5px; }
+        .mini-btn { padding: 4px 8px; font-size: 10px; min-width: 50px; }
+        
+        .chk-label { font-size: 11px; display: flex; align-items: center; gap: 5px; cursor: pointer; user-select: none; color:#888;}
+        .chk-label input:checked + span { color: var(--accent); }
+
+        /* Modal Overlay */
+        #overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.85);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 100;
         }
-        .btn-indicator {
-            background: #333;
+        .modal {
+            background: var(--panel);
+            padding: 30px;
+            border-radius: 10px;
+            border: 1px solid var(--accent);
             text-align: center;
-            padding: 4px;
-            border-radius: 3px;
-            font-size: 10px;
+            width: 450px;
         }
-        .btn-indicator.active {
-            background: var(--accent);
-            color: #000;
-            font-weight: bold;
-        }
-        button.action-btn {
-            background: var(--accent);
-            border: none;
-            color: #000;
-            padding: 10px 20px;
-            font-weight: bold;
-            cursor: pointer;
-            margin-bottom: 10px;
-            width: 100%;
-        }
-        #log-output {
-            width: 100%;
-            height: 200px;
+        .calib-feedback {
+            margin: 20px 0;
             background: #000;
-            color: #fff;
+            padding: 15px;
+            border-radius: 6px;
             font-family: monospace;
-            border: 1px solid #444;
-            margin-top: 10px;
         }
-        .status-tag {
-            display: inline-block;
-            padding: 2px 6px;
-            border-radius: 4px;
-            font-size: 11px;
-            margin-right: 5px;
+        .calib-bar-container {
+            height: 20px; background: #333; width: 100%; margin-top:10px; position: relative;
         }
-        .tag-gamepad { background: #444; border: 1px solid #888; }
-        .tag-hid { background: #2b4; color: #000; }
-        .tag-err { background: var(--err); color: #fff; }
+        .calib-bar-fill {
+            height: 100%; background: #666; width: 10px; position: absolute; transition: left 0.05s;
+        }
+        .calib-range-fill {
+            height: 4px; background: var(--accent); position: absolute; top: 8px; opacity: 0.8;
+        }
+
     </style>
 </head>
 <body>
 
-<div class="container">
-    <!-- Left Panel: Real-time Visualizer -->
+<header>
+    <div>
+        <h1>Flight Hardware Calibrator v2</h1>
+        <div style="font-size: 12px; color: #888;">Map, Calibrate Range, and Normalize</div>
+    </div>
+    <div class="btn-group">
+        <button onclick="app.resetConfig()" class="danger">Reset Defaults</button>
+        <button onclick="app.autoDetect()" class="primary">Auto-Detect Devices</button>
+        <button onclick="app.exportConfig()">Export JSON</button>
+    </div>
+</header>
+
+<div class="workspace">
+    <!-- Left Panel: Raw Input Stream -->
     <div class="panel">
-        <h2>Live Input Monitor</h2>
-        <div id="api-status">Checking APIs...</div>
-        <hr style="border-color: #333">
-        <div id="device-container">
-            <!-- Devices injected here -->
-            <div style="color: #666; padding: 20px;">Waiting for user input... Press buttons on your controller.</div>
+        <div class="panel-header">
+            <span>Raw Inputs</span>
+            <span id="device-count" style="font-size: 11px; color: #aaa;">0 Devices</span>
+        </div>
+        <div class="panel-content" id="raw-device-list">
+            <div style="padding:20px; color:#666; text-align:center;">Connect hardware and press buttons to wake...</div>
         </div>
     </div>
 
-    <!-- Right Panel: Data Logging -->
+    <!-- Right Panel: Flight Deck Mapping -->
     <div class="panel">
-        <h2>Snapshot & Debug</h2>
-        <p>Instructions: Move your flight stick/throttle, then click "Capture Snapshot". Copy the JSON below.</p>
-        
-        <button class="action-btn" onclick="captureSnapshot()">CAPTURE SNAPSHOT</button>
-        <button class="action-btn" style="background:var(--warn)" onclick="requestHID()">ATTEMPT WEBHID REQUEST</button>
-        
-        <textarea id="log-output" readonly placeholder="Snapshot data will appear here..."></textarea>
-        <button onclick="copyToClipboard()" style="margin-top:5px; padding:5px;">Copy to Clipboard</button>
-        
-        <h3>System Info</h3>
-        <div id="sys-info" style="font-size: 12px; line-height: 1.5;"></div>
+        <div class="panel-header">
+            <span>Control Mapping</span>
+            <div style="font-size: 11px; color: var(--accent);">Changes saved automatically</div>
+        </div>
+        <div class="panel-content" id="mapping-list">
+            <!-- Mappings injected by JS -->
+        </div>
+    </div>
+</div>
+
+<!-- Modal for Listening/Calibrating -->
+<div id="overlay">
+    <div class="modal" id="modal-content">
+        <!-- Injected Content -->
     </div>
 </div>
 
 <script>
-    const deviceContainer = document.getElementById('device-container');
-    const logOutput = document.getElementById('log-output');
-    const sysInfo = document.getElementById('sys-info');
+/**
+ * FLIGHT HARDWARE CALIBRATOR v2
+ * Features: Range Calibration, Center Normalization, Visual Feedback
+ */
 
-    // System Diagnostics
-    function checkSystem() {
-        const ua = navigator.userAgent;
-        const hasGamepad = 'getGamepads' in navigator;
-        const hasHID = 'hid' in navigator;
-        
-        document.getElementById('api-status').innerHTML = `
-            Gamepad API: ${hasGamepad ? '<span style="color:#0f0">ACTIVE</span>' : '<span style="color:red">MISSING</span>'} <br>
-            WebHID API: ${hasHID ? '<span style="color:#0f0">AVAILABLE</span>' : '<span style="color:red">UNSUPPORTED</span>'}
-        `;
+const FLIGHT_FUNCTIONS = {
+    // Primary Flight Controls
+    pitch:    { label: "Pitch (Y-Axis)", type: "axis", default: { deviceId: null, axis: 1, reverse: false } },
+    roll:     { label: "Roll (X-Axis)",  type: "axis", default: { deviceId: null, axis: 0, reverse: false } },
+    yaw:      { label: "Yaw (Rudder)",   type: "axis", default: { deviceId: null, axis: 5, reverse: false } }, 
+    throttle: { label: "Throttle",       type: "axis", default: { deviceId: null, axis: 2, reverse: true } }, 
+    
+    // Buttons
+    trigger:  { label: "Trigger (Fire)", type: "button", default: { deviceId: null, btn: 0 } },
+    brakes:   { label: "Air Brakes",     type: "button", default: { deviceId: null, btn: 1 } },
+    recenter: { label: "VR Recenter",    type: "button", default: { deviceId: null, btn: 4 } }
+};
 
-        sysInfo.innerHTML = `
-            UserAgent: ${ua}<br>
-            Platform: ${navigator.platform}<br>
-            SecureContext: ${window.isSecureContext ? 'Yes' : 'No'}
-        `;
-    }
-
-    // Main Loop
-    function update() {
-        const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
-        let html = '';
-        let devicesFound = false;
-
-        for (let i = 0; i < gamepads.length; i++) {
-            const gp = gamepads[i];
-            if (gp) {
-                devicesFound = true;
-                html += renderGamepad(gp, i);
-            }
-        }
-
-        if (devicesFound) {
-            deviceContainer.innerHTML = html;
-        } else {
-            deviceContainer.innerHTML = '<div style="color: #666; padding: 20px;">No Gamepads Detected. Press a button to wake device.</div>';
-        }
-
-        requestAnimationFrame(update);
-    }
-
-    function renderGamepad(gp, index) {
-        // Render Axes
-        let axesHtml = '';
-        gp.axes.forEach((val, idx) => {
-            // Visualize -1 to 1 mapped to 0% to 100% width
-            const percent = ((val + 1) / 2) * 100;
-            const color = Math.abs(val) > 0.1 ? 'var(--accent)' : '#444';
-            axesHtml += `
-                <div class="axis-row">
-                    <div class="axis-label">AXIS ${idx}</div>
-                    <div class="axis-track">
-                        <div class="axis-fill" style="width: ${percent}%; background: ${color}"></div>
-                    </div>
-                    <div class="axis-val">${val.toFixed(2)}</div>
-                </div>
-            `;
-        });
-
-        // Render Buttons
-        let btnsHtml = '<div class="btn-grid">';
-        gp.buttons.forEach((btn, idx) => {
-            const activeClass = btn.pressed ? 'active' : '';
-            const val = btn.value > 0 ? `(${btn.value.toFixed(1)})` : '';
-            btnsHtml += `<div class="btn-indicator ${activeClass}">${idx} ${val}</div>`;
-        });
-        btnsHtml += '</div>';
-
-        return `
-            <div class="device-card">
-                <div><span class="status-tag tag-gamepad">GAMEPAD API</span> <strong>Index: ${index}</strong></div>
-                <div style="font-size: 11px; margin-bottom: 10px; color: #888;">${gp.id}</div>
-                <div style="margin-bottom: 10px;"><strong>Axes:</strong> ${axesHtml}</div>
-                <div><strong>Buttons:</strong> ${btnsHtml}</div>
-            </div>
-        `;
-    }
-
-    // Logic to capture a snapshot of current state
-    function captureSnapshot() {
-        const data = {
-            timestamp: new Date().toISOString(),
-            userAgent: navigator.userAgent,
-            gamepads: []
+class CalibratorApp {
+    constructor() {
+        this.config = this.loadConfig();
+        this.state = {
+            mode: 'idle', // 'idle', 'mapping', 'calibrating'
+            targetFunc: null,
+            tempMin: 0,
+            tempMax: 0,
+            baselines: {}
         };
+        this.devices = [];
+        this.renderMappingUI();
+        this.loop();
+    }
 
+    loadConfig() {
+        const saved = localStorage.getItem('flight_config_v2');
+        if (saved) return JSON.parse(saved);
+        
+        const clean = {};
+        for(let key in FLIGHT_FUNCTIONS) {
+            clean[key] = { 
+                mapped: false, 
+                deviceId: null, 
+                index: null, 
+                reverse: false, 
+                enabled: true,
+                min: -1, 
+                max: 1,
+                deadzone: 0.05 
+            };
+        }
+        return clean;
+    }
+
+    saveConfig() {
+        localStorage.setItem('flight_config_v2', JSON.stringify(this.config));
+    }
+
+    resetConfig() {
+        if(confirm("Clear all mappings?")) {
+            localStorage.removeItem('flight_config_v2');
+            location.reload();
+        }
+    }
+
+    autoDetect() {
         const gps = navigator.getGamepads();
+        let changed = false;
+
         for (let i = 0; i < gps.length; i++) {
             const gp = gps[i];
-            if(gp) {
-                data.gamepads.push({
-                    index: gp.index,
-                    id: gp.id,
-                    mapping: gp.mapping,
-                    axes: gp.axes, // Snapshot of current values
-                    buttons: gp.buttons.map(b => ({ pressed: b.pressed, value: b.value }))
-                });
+            if (!gp) continue;
+            const id = gp.id.toLowerCase();
+            
+            // Thrustmaster T.16000M
+            if (id.includes('b10a') || id.includes('t.16000m')) {
+                this.setConfig('pitch', gp.id, 1, false);
+                this.setConfig('roll', gp.id, 0, false);
+                this.setConfig('yaw', gp.id, 5, false);
+                this.setConfig('trigger', gp.id, 0, false, 'button');
+                changed = true;
+            }
+
+            // TWCS Throttle
+            if (id.includes('b687') || id.includes('twcs')) {
+                this.setConfig('throttle', gp.id, 2, false);
+                if (gp.axes.length > 6) {
+                    this.setConfig('yaw', gp.id, 6, false); // Override rudder if found
+                }
+                changed = true;
             }
         }
-
-        logOutput.value = JSON.stringify(data, null, 2);
+        if (changed) {
+            this.saveConfig();
+            this.renderMappingUI();
+            alert("Auto-detected T.16000M / TWCS profile applied! Please Calibrate Ranges.");
+        } else {
+            alert("No known profiles matched.");
+        }
     }
 
-    // WebHID Request Handler
-    async function requestHID() {
-        if (!navigator.hid) {
-            alert("WebHID API is not supported in this browser.");
-            return;
-        }
+    setConfig(funcId, devId, index, reverse, type = 'axis') {
+        this.config[funcId] = {
+            ...this.config[funcId],
+            mapped: true,
+            deviceId: devId,
+            index: index,
+            reverse: reverse,
+            enabled: true,
+            // Reset calibration on new map
+            min: -1.0,
+            max: 1.0
+        };
+    }
 
-        try {
-            const devices = await navigator.hid.requestDevice({ filters: [] });
-            if (devices.length > 0) {
-                logOutput.value = `SUCCESS: WebHID permission granted for:\n${devices[0].productName}\nVendor: ${devices[0].vendorId}\nProduct: ${devices[0].productId}`;
-                
-                // Try to listen to input report
-                devices[0].open().then(() => {
-                   devices[0].addEventListener("inputreport", event => {
-                       console.log(event); // Log to console for deep debugging
-                   });
-                });
+    // --- LOOP ---
+    loop() {
+        requestAnimationFrame(() => this.loop());
+        this.devices = navigator.getGamepads ? navigator.getGamepads() : [];
+        this.renderRawDevices();
+        this.updateVisuals();
+
+        if (this.state.mode === 'mapping') this.detectMappingInput();
+        if (this.state.mode === 'calibrating') this.updateCalibration();
+    }
+
+    // --- MAPPING MODE ---
+    startMap(funcId) {
+        this.state.mode = 'mapping';
+        this.state.targetFunc = funcId;
+        this.state.baselines = this.captureBaselines();
+        
+        this.showModal(`
+            <h2 style="color:var(--warn)">Listening...</h2>
+            <p>Move <strong>${FLIGHT_FUNCTIONS[funcId].label}</strong> significantly.</p>
+            <button onclick="app.cancelModal()">Cancel</button>
+        `);
+    }
+
+    captureBaselines() {
+        const base = {};
+        for(let i=0; i<this.devices.length; i++) {
+            const gp = this.devices[i];
+            if(!gp) continue;
+            base[gp.id] = { axes: [...gp.axes], buttons: gp.buttons.map(b => b.value) };
+        }
+        return base;
+    }
+
+    detectMappingInput() {
+        const def = FLIGHT_FUNCTIONS[this.state.targetFunc];
+        const threshold = 0.5;
+        
+        for(let i=0; i<this.devices.length; i++) {
+            const gp = this.devices[i];
+            if(!gp) continue;
+            const base = this.state.baselines[gp.id];
+            if(!base) continue;
+
+            if (def.type === 'axis') {
+                for(let a=0; a<gp.axes.length; a++) {
+                    if (Math.abs(gp.axes[a] - base.axes[a]) > threshold) {
+                        this.finishMap(gp.id, a);
+                        return;
+                    }
+                }
+            } else {
+                for(let b=0; b<gp.buttons.length; b++) {
+                    if (Math.abs(gp.buttons[b].value - base.buttons[b]) > 0.5) {
+                        this.finishMap(gp.id, b);
+                        return;
+                    }
+                }
             }
-        } catch (e) {
-            logOutput.value = `ERROR: WebHID Request Failed.\n${e.name}: ${e.message}\n\nNote: Quest Browser often blocks this unless specific experimental flags are enabled.`;
         }
     }
 
-    function copyToClipboard() {
-        logOutput.select();
-        document.execCommand('copy');
-        alert("Copied to clipboard!");
+    finishMap(devId, index) {
+        this.setConfig(this.state.targetFunc, devId, index, false);
+        this.saveConfig();
+        this.cancelModal();
+        this.renderMappingUI();
     }
 
-    // Start
-    checkSystem();
-    requestAnimationFrame(update);
+    // --- CALIBRATION MODE ---
+    startCalibrate(funcId) {
+        const cfg = this.config[funcId];
+        if(!cfg.mapped) return;
+        
+        this.state.mode = 'calibrating';
+        this.state.targetFunc = funcId;
+        // Start with inverted values to force expansion
+        this.state.tempMin = 1.0; 
+        this.state.tempMax = -1.0;
 
+        this.showModal(`
+            <h2 style="color:var(--accent)">Calibrate Range</h2>
+            <p>Sweep <strong>${FLIGHT_FUNCTIONS[funcId].label}</strong> to its MIN and MAX limits.</p>
+            <div class="calib-feedback">
+                RAW Value: <span id="calib-val">0.00</span><br>
+                Detected MIN: <span id="calib-min" style="color:var(--warn)">--</span><br>
+                Detected MAX: <span id="calib-max" style="color:var(--accent)">--</span>
+                <div class="calib-bar-container">
+                    <div id="calib-range-vis" class="calib-range-fill"></div>
+                    <div id="calib-val-vis" class="calib-bar-fill"></div>
+                </div>
+            </div>
+            <button onclick="app.finishCalibrate()" class="primary">Save Range</button>
+            <button onclick="app.cancelModal()">Cancel</button>
+        `);
+    }
+
+    updateCalibration() {
+        const cfg = this.config[this.state.targetFunc];
+        const gp = Array.from(this.devices).find(d => d && d.id === cfg.deviceId);
+        if(!gp) return;
+
+        let val = 0;
+        if(FLIGHT_FUNCTIONS[this.state.targetFunc].type === 'axis') {
+            val = gp.axes[cfg.index];
+        } else {
+            val = gp.buttons[cfg.index].value;
+        }
+
+        // Expand Range
+        if (val < this.state.tempMin) this.state.tempMin = val;
+        if (val > this.state.tempMax) this.state.tempMax = val;
+
+        // Update UI
+        document.getElementById('calib-val').innerText = val.toFixed(3);
+        document.getElementById('calib-min').innerText = this.state.tempMin.toFixed(3);
+        document.getElementById('calib-max').innerText = this.state.tempMax.toFixed(3);
+        
+        // Vis
+        const visVal = ((val + 1)/2) * 100;
+        const visMin = ((this.state.tempMin + 1)/2) * 100;
+        const visMax = ((this.state.tempMax + 1)/2) * 100;
+        
+        document.getElementById('calib-val-vis').style.left = `${visVal}%`;
+        const rangeBar = document.getElementById('calib-range-vis');
+        rangeBar.style.left = `${visMin}%`;
+        rangeBar.style.width = `${visMax - visMin}%`;
+    }
+
+    finishCalibrate() {
+        // Enforce a tiny spread if user didn't move it
+        if (this.state.tempMax - this.state.tempMin < 0.1) {
+            this.state.tempMin = -1;
+            this.state.tempMax = 1;
+        }
+        
+        this.config[this.state.targetFunc].min = this.state.tempMin;
+        this.config[this.state.targetFunc].max = this.state.tempMax;
+        this.saveConfig();
+        this.cancelModal();
+    }
+
+    // --- UI HELPERS ---
+    showModal(html) {
+        const overlay = document.getElementById('overlay');
+        const content = document.getElementById('modal-content');
+        content.innerHTML = html;
+        overlay.style.display = 'flex';
+    }
+
+    cancelModal() {
+        this.state.mode = 'idle';
+        document.getElementById('overlay').style.display = 'none';
+    }
+
+    toggleReverse(funcId) {
+        this.config[funcId].reverse = !this.config[funcId].reverse;
+        this.saveConfig();
+        this.updateVisuals(); // Immediate feedback
+    }
+
+    toggleEnabled(funcId) {
+        this.config[funcId].enabled = !this.config[funcId].enabled;
+        this.saveConfig();
+        this.renderMappingUI();
+    }
+
+    renderRawDevices() {
+        const container = document.getElementById('raw-device-list');
+        let html = '';
+        let count = 0;
+        for(let i=0; i<this.devices.length; i++) {
+            const gp = this.devices[i];
+            if(!gp) continue;
+            count++;
+            const bars = gp.axes.map((a, idx) => {
+                const w = ((a + 1) / 2) * 100;
+                return `<div style="display:flex; height:4px; background:#333; margin-top:2px;" title="Axis ${idx}">
+                    <div style="width:${w}%; background:#555;"></div></div>`;
+            }).join('');
+            html += `<div class="device-card"><strong>${gp.id}</strong><div style="margin-top:5px;">${bars}</div></div>`;
+        }
+        if(count > 0) container.innerHTML = html;
+        document.getElementById('device-count').innerText = `${count}`;
+    }
+
+    renderMappingUI() {
+        const container = document.getElementById('mapping-list');
+        container.innerHTML = '';
+        
+        Object.keys(FLIGHT_FUNCTIONS).forEach(key => {
+            const def = FLIGHT_FUNCTIONS[key];
+            const cfg = this.config[key];
+            const div = document.createElement('div');
+            div.className = 'map-row';
+            div.style.opacity = cfg.enabled ? '1' : '0.5';
+
+            let status = "Unmapped";
+            let calibBtn = '';
+            if (cfg.mapped) {
+                const devName = cfg.deviceId.length > 15 ? '...' + cfg.deviceId.slice(-15) : cfg.deviceId;
+                status = `<span>${devName}</span><span>IDX: ${cfg.index} | Range: ${cfg.min.toFixed(1)} to ${cfg.max.toFixed(1)}</span>`;
+                calibBtn = `<button class="mini-btn" onclick="app.startCalibrate('${key}')" title="Set Min/Max Range">CALIB</button>`;
+            }
+
+            const chkRev = def.type === 'axis' ? 
+                `<label class="chk-label"><input type="checkbox" ${cfg.reverse ? 'checked' : ''} onchange="app.toggleReverse('${key}')"> <span>REV</span></label>` : '';
+            const chkEn = `<label class="chk-label"><input type="checkbox" ${cfg.enabled ? 'checked' : ''} onchange="app.toggleEnabled('${key}')"> <span>ON</span></label>`;
+
+            div.innerHTML = `
+                <div class="label-col">${def.label}</div>
+                <div class="status-col" title="${cfg.deviceId}">${status}</div>
+                <div class="visual-col">
+                    <div class="visual-center"></div>
+                    <div class="visual-bar" id="vis-${key}"></div>
+                </div>
+                <div class="controls-col">
+                    ${chkRev}
+                    ${chkEn}
+                    ${calibBtn}
+                    <button class="mini-btn primary" onclick="app.startMap('${key}')">MAP</button>
+                </div>
+            `;
+            container.appendChild(div);
+        });
+    }
+
+    updateVisuals() {
+        Object.keys(FLIGHT_FUNCTIONS).forEach(key => {
+            const cfg = this.config[key];
+            const bar = document.getElementById(`vis-${key}`);
+            if (!cfg.mapped || !cfg.enabled || !bar) { if(bar) bar.style.width = '0%'; return; }
+
+            const gp = Array.from(this.devices).find(d => d && d.id === cfg.deviceId);
+            if (!gp) return;
+
+            // 1. Get Raw Value
+            let rawVal = (FLIGHT_FUNCTIONS[key].type === 'axis') ? gp.axes[cfg.index] : gp.buttons[cfg.index].value;
+            
+            // 2. Normalize based on Calibration (Min/Max -> 0..1)
+            let norm = (rawVal - cfg.min) / (cfg.max - cfg.min);
+            
+            // Clamp (in case hardware goes slightly beyond calib)
+            norm = Math.max(0, Math.min(1, norm));
+
+            // 3. Apply Reverse
+            if (cfg.reverse) norm = 1.0 - norm;
+
+            // 4. Visualize
+            // For Axes, we often want center-out visual, but for calibration feedback, linear 0-100 is clearer.
+            // Let's stick to linear 0-100% for the visual bar.
+            bar.style.left = '0%';
+            bar.style.width = `${norm * 100}%`;
+        });
+    }
+
+    exportConfig() {
+        const json = JSON.stringify(this.config, null, 2);
+        const blob = new Blob([json], {type: "application/json"});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = "flight_config.json";
+        a.click();
+    }
+}
+
+window.app = new CalibratorApp();
 </script>
 </body>
 </html>
