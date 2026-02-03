@@ -3,278 +3,422 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Flight Calibrator v4 - Event Logger</title>
+    <title>Flight Calibrator v6 - Direct USB</title>
     <style>
         :root {
-            --bg: #000000;
+            --bg: #050505;
             --panel: #111;
-            --text: #eee;
-            --accent: #00ff00;
-            --highlight: #ccff00;
-            --dim: #555;
+            --text: #ccc;
+            --accent: #00e5ff;
+            --warn: #ffcc00;
+            --err: #ff4444;
+            --success: #00ff66;
             --border: #333;
         }
         body {
-            background: var(--bg);
-            color: var(--text);
-            font-family: 'Consolas', 'Monaco', monospace;
-            margin: 0;
-            padding: 10px;
-            height: 100vh;
-            box-sizing: border-box;
-            overflow: hidden;
-            display: flex;
-            flex-direction: column;
+            background: var(--bg); color: var(--text);
+            font-family: 'Consolas', monospace;
+            margin: 0; padding: 10px; height: 100vh;
+            display: flex; flex-direction: column; overflow: hidden;
         }
-        
-        /* Header */
+
+        /* HEADER */
         header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding-bottom: 10px;
-            border-bottom: 2px solid var(--border);
-            margin-bottom: 10px;
+            display: flex; justify-content: space-between; align-items: center;
+            border-bottom: 2px solid var(--border); padding-bottom: 10px; margin-bottom: 10px;
         }
-        h1 { margin:0; font-size: 18px; color: var(--accent); text-transform: uppercase; letter-spacing: 2px; }
+        h1 { margin:0; font-size:16px; color:var(--accent); text-transform:uppercase; letter-spacing:1px; }
 
-        /* Main Split */
-        .workspace {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 15px;
-            flex-grow: 1;
-            overflow: hidden;
+        /* TABS */
+        .tabs { display: flex; gap: 5px; background: #222; padding: 4px; border-radius: 4px; }
+        .tab {
+            background: transparent; border: none; color: #666; padding: 6px 12px;
+            cursor: pointer; font-family: inherit; font-size: 11px; font-weight: bold;
+            border-radius: 3px;
         }
+        .tab.active { background: var(--accent); color: #000; }
+        .tab:hover:not(.active) { color: #fff; }
 
-        /* Panels */
+        /* WORKSPACE */
+        .workspace { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; flex-grow: 1; overflow: hidden; }
         .panel {
-            background: var(--panel);
-            border: 1px solid var(--border);
-            display: flex;
-            flex-direction: column;
-            overflow: hidden;
+            background: var(--panel); border: 1px solid var(--border);
+            display: flex; flex-direction: column; overflow: hidden; border-radius: 4px;
         }
         .panel-head {
-            background: #222;
-            padding: 8px;
-            font-size: 12px;
-            font-weight: bold;
-            border-bottom: 1px solid var(--border);
-            color: var(--accent);
-            display: flex; justify-content: space-between;
+            background: #1a1a1a; padding: 8px 12px; font-size: 11px; font-weight: bold;
+            border-bottom: 1px solid var(--border); color: #888;
+            display: flex; justify-content: space-between; align-items: center;
         }
-        .panel-body {
-            padding: 10px;
-            overflow-y: auto;
-            flex-grow: 1;
-        }
+        .panel-body { padding: 10px; overflow-y: auto; flex-grow: 1; }
 
-        /* Device Cards */
-        .device-card {
-            margin-bottom: 15px;
-            border: 1px solid var(--dim);
-            padding: 8px;
+        /* WEBUSB GRID */
+        .byte-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(35px, 1fr)); gap: 4px; }
+        .byte-cell {
+            background: #222; border: 1px solid #333; padding: 4px; text-align: center;
+            cursor: pointer; transition: background 0.1s;
         }
-        .dev-header {
-            font-weight: bold; color: #fff; margin-bottom: 5px; font-size: 12px;
-            border-bottom: 1px solid #333; padding-bottom: 4px;
+        .byte-cell:hover { border-color: #fff; }
+        .byte-lbl { font-size: 8px; color: #555; display: block; }
+        .byte-val { font-size: 11px; font-weight: bold; color: #fff; }
+        .byte-cell.changed { background: #004400; border-color: #00ff00; }
+        .byte-cell.mapped { background: #003344; border-color: var(--accent); }
+
+        /* GAMEPAD CARDS */
+        .gp-card { border: 1px solid #333; margin-bottom: 10px; padding: 8px; background: #161616; }
+        .gp-head { font-size: 11px; color: var(--warn); margin-bottom: 5px; font-weight: bold; }
+        .axis-bar { height: 6px; background: #333; margin: 2px 0; position: relative; }
+        .axis-fill { height: 100%; background: #666; width: 0%; position: absolute; }
+        .slot-scanner { font-size: 10px; color: #666; margin-bottom: 10px; padding: 5px; border: 1px dashed #333; }
+
+        /* MAPPING LIST */
+        .map-row { display: flex; align-items: center; margin-bottom: 4px; background: #181818; padding: 5px; border-radius: 3px; }
+        .map-lbl { width: 80px; font-size: 11px; font-weight: bold; }
+        .map-src { width: 100px; font-size: 9px; color: #aaa; text-align: center; }
+        .map-vis { flex-grow: 1; height: 8px; background: #333; margin: 0 10px; position: relative; }
+        .map-fill { height: 100%; background: var(--accent); width: 0%; position: absolute; }
+        .btn-mini {
+            background: #333; border: 1px solid #444; color: #ccc;
+            font-size: 9px; padding: 3px 8px; cursor: pointer; margin-left: 2px;
         }
-        .dev-stats { font-size: 10px; color: #888; margin-bottom: 8px; }
+        .btn-mini.active { background: var(--warn); color: #000; border-color: var(--warn); }
+        .btn-mini:hover { border-color: #fff; }
 
-        /* Axis Bars */
-        .axis-row { display: flex; align-items: center; font-size: 10px; margin-bottom: 2px; }
-        .axis-idx { width: 30px; color: #888; }
-        .axis-track { flex-grow: 1; height: 10px; background: #333; margin: 0 5px; position: relative; }
-        .axis-fill { height: 100%; background: var(--accent); position: absolute; }
-        .axis-val { width: 35px; text-align: right; color: #fff; }
-
-        /* Button Grid */
-        .btn-grid { display: flex; flex-wrap: wrap; gap: 2px; margin-top: 5px; }
-        .btn-cell {
-            width: 20px; height: 15px; background: #333; font-size: 9px;
-            display: flex; align-items: center; justify-content: center; color: #888;
-        }
-        .btn-cell.active { background: var(--highlight); color: #000; font-weight: bold; }
-
-        /* Event Log */
-        .log-entry {
-            font-size: 11px;
-            padding: 3px 0;
-            border-bottom: 1px solid #222;
-            display: flex;
-        }
-        .log-time { color: #666; width: 60px; }
-        .log-dev { color: var(--accent); width: 40px; }
-        .log-msg { color: #fff; flex-grow: 1; }
-        .log-val { color: var(--highlight); width: 50px; text-align: right; }
-
+        #err-log { color: var(--err); font-size: 11px; padding: 10px; display: none; background: #220000; border-bottom: 1px solid var(--err); }
     </style>
 </head>
 <body>
 
 <header>
-    <h1>Input Diagnostics</h1>
-    <div style="font-size: 10px; color: #888;">QUEST DEBUGGER</div>
+    <h1>Flight Calibrator v6 <span style="font-size:10px; color:#555">DIRECT USB EDITION</span></h1>
+    <div class="tabs">
+        <button class="tab active" onclick="app.setTab('gamepad')" id="tab-gamepad">Gamepad API</button>
+        <button class="tab" onclick="app.setTab('webusb')" id="tab-webusb">WebUSB (Direct)</button>
+    </div>
 </header>
 
+<div id="err-log"></div>
+
 <div class="workspace">
-    <!-- LEFT: STATE INSPECTOR -->
+    <!-- INPUT SOURCE PANEL -->
     <div class="panel">
         <div class="panel-head">
-            <span>LIVE STATE</span>
-            <span id="dev-count">Scanning...</span>
+            <span id="source-status">SCANNING...</span>
+            <button id="usb-conn-btn" class="btn-mini active" style="display:none;" onclick="app.connectWebUSB()">CONNECT USB</button>
         </div>
-        <div class="panel-body" id="state-container"></div>
+        <div class="panel-body" id="input-view"></div>
     </div>
 
-    <!-- RIGHT: EVENT LOG -->
+    <!-- MAPPING PANEL -->
     <div class="panel">
         <div class="panel-head">
-            <span>CHANGE LOG (MOVE RUDDER NOW)</span>
-            <button onclick="logger.clear()" style="background:#333; border:none; color:#fff; cursor:pointer;">Clear</button>
+            <span>FLIGHT CONTROLS</span>
+            <div>
+                <button class="btn-mini" onclick="app.resetConfig()">RESET</button>
+                <button class="btn-mini" onclick="app.exportConfig()">EXPORT</button>
+            </div>
         </div>
-        <div class="panel-body" id="log-container">
-            <div style="color:#666; font-style:italic;">Waiting for input changes...</div>
-        </div>
+        <div class="panel-body" id="map-view"></div>
     </div>
 </div>
 
 <script>
-class Diagnostics {
+/**
+ * FLIGHT CALIBRATOR v6
+ * Features: WebUSB Direct Parsing, Hybrid Input (GP+USB), Brute Force Scanning
+ */
+
+const CONTROLS = {
+    pitch: { label: "Pitch", type: "axis" },
+    roll: { label: "Roll", type: "axis" },
+    yaw: { label: "Rudder", type: "axis" },
+    throttle: { label: "Throttle", type: "axis", reverse: true },
+    leftBrake: { label: "L-Brake", type: "axis" },
+    rightBrake: { label: "R-Brake", type: "axis" },
+    trigger: { label: "Trigger", type: "button" }
+};
+
+class App {
     constructor() {
-        this.cache = {}; // Store previous values to detect changes
-        this.devices = [];
-        this.logEl = document.getElementById('log-container');
+        this.mode = 'gamepad';
+        this.config = this.loadConfig();
+        this.usbDevice = null;
+        this.usbEndpoint = null;
+        this.usbData = new Uint8Array(64);
+        this.prevUsbData = new Uint8Array(64);
+        this.gamepads = [];
+        this.mapTarget = null;
+        
+        this.initUI();
         this.loop();
     }
 
+    loadConfig() {
+        try {
+            return JSON.parse(localStorage.getItem('flight_cfg_v6')) || this.defaultConfig();
+        } catch(e) { return this.defaultConfig(); }
+    }
+
+    defaultConfig() {
+        const c = {};
+        for(let k in CONTROLS) c[k] = { mapped: false, src: 'gp', id: 0, idx: 0, min: -1, max: 1, rev: CONTROLS[k].reverse||false };
+        return c;
+    }
+
+    save() { localStorage.setItem('flight_cfg_v6', JSON.stringify(this.config)); }
+
+    setTab(m) {
+        this.mode = m;
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.getElementById(`tab-${m}`).classList.add('active');
+        document.getElementById('usb-conn-btn').style.display = m === 'webusb' ? 'block' : 'none';
+        
+        const view = document.getElementById('input-view');
+        if (m === 'webusb' && !this.usbDevice) {
+            view.innerHTML = `<div style="padding:20px; text-align:center; color:#666;">
+                <p><strong>Direct USB Mode</strong></p>
+                <p>Attempts to bypass Android Gamepad driver.</p>
+                <p>Click "CONNECT USB" to start.</p>
+            </div>`;
+        }
+    }
+
+    // --- WEBUSB LOGIC ---
+    async connectWebUSB() {
+        try {
+            document.getElementById('err-log').style.display = 'none';
+            // Filter for Thrustmaster (0x044f)
+            const device = await navigator.usb.requestDevice({ filters: [{ vendorId: 0x044f }] });
+            await device.open();
+            
+            // Auto-select config 1
+            if (device.configuration === null) await device.selectConfiguration(1);
+            
+            // Find Interrupt IN Endpoint
+            const intf = device.configuration.interfaces[0];
+            const alt = intf.alternates[0];
+            const ep = alt.endpoints.find(e => e.direction === 'in' && e.type === 'interrupt');
+            
+            if (!ep) throw new Error("No Interrupt IN endpoint found.");
+            
+            this.usbEndpoint = ep.endpointNumber;
+            
+            // DANGEROUS STEP: Claim Interface
+            // If Android OS owns this, this line will throw SecurityError
+            await device.claimInterface(intf.interfaceNumber);
+            
+            this.usbDevice = device;
+            this.readUSBLoop(device, this.usbEndpoint);
+            
+        } catch (e) {
+            const err = document.getElementById('err-log');
+            err.style.display = 'block';
+            err.innerHTML = `<strong>USB Error:</strong> ${e.name} - ${e.message}<br>
+            If "SecurityError" or "NetworkError": The Android OS has locked this device driver. We cannot bypass it.`;
+        }
+    }
+
+    async readUSBLoop(device, endpoint) {
+        while (device.opened) {
+            try {
+                const res = await device.transferIn(endpoint, 64);
+                if (res.status === 'ok' && res.data) {
+                    for(let i=0; i<res.data.byteLength; i++) {
+                        this.prevUsbData[i] = this.usbData[i];
+                        this.usbData[i] = res.data.getUint8(i);
+                    }
+                    if (this.mapTarget && this.mapTarget.src === 'webusb') this.checkUsbMap();
+                }
+            } catch (e) {
+                console.error("USB Read Error", e);
+                break;
+            }
+        }
+    }
+
+    // --- GAMEPAD LOGIC ---
+    scanGamepads() {
+        // Brute Force Scan Indices 0-4
+        const gps = navigator.getGamepads ? navigator.getGamepads() : [];
+        this.gamepads = [];
+        // Explicitly check first 4 slots even if length is reported weirdly
+        for(let i=0; i<5; i++) {
+            if (gps[i]) this.gamepads.push(gps[i]);
+        }
+    }
+
+    // --- MAPPING ---
+    startMap(key) {
+        this.mapTarget = { key: key, src: this.mode }; // Map from current view source
+        const btn = document.getElementById(`btn-map-${key}`);
+        if(btn) { btn.innerText = "MOVE..."; btn.classList.add('active'); }
+    }
+
+    checkUsbMap() {
+        // Find changed byte
+        for(let i=0; i<64; i++) {
+            if (Math.abs(this.usbData[i] - this.prevUsbData[i]) > 5) { // Threshold
+                this.applyMap(this.mapTarget.key, 'webusb', 0, i); // ID 0, Index = Byte Offset
+                return;
+            }
+        }
+    }
+
+    checkGpMap() {
+        // Find changed axis/btn
+        this.gamepads.forEach(gp => {
+            // Axes
+            gp.axes.forEach((val, idx) => {
+                // We need history to detect change, simplified here to "Active" check for demo
+                // Ideally we'd store GP history like we did in v4.
+                // For v6, user manually clicks axis in UI or we assume significant motion
+                if (Math.abs(val) > 0.5) { 
+                    // this.applyMap(this.mapTarget.key, 'gp', gp.index, idx); 
+                }
+            });
+        });
+    }
+
+    manualMap(src, id, idx) {
+        if(this.mapTarget) {
+            this.applyMap(this.mapTarget.key, src, id, idx);
+        }
+    }
+
+    applyMap(key, src, id, idx) {
+        const c = this.config[key];
+        c.mapped = true;
+        c.src = src;
+        c.id = id;
+        c.idx = idx;
+        c.min = src === 'webusb' ? 0 : -1;
+        c.max = src === 'webusb' ? 255 : 1;
+        
+        this.mapTarget = null;
+        this.save();
+        this.initUI();
+    }
+
+    // --- RENDER LOOP ---
     loop() {
         requestAnimationFrame(() => this.loop());
         
-        const gps = navigator.getGamepads ? navigator.getGamepads() : [];
-        this.devices = [];
-        
-        // Scan
-        for(let i=0; i<gps.length; i++) {
-            const gp = gps[i];
-            if(gp) {
-                this.devices.push(gp);
-                this.analyze(gp);
-            }
+        if (this.mode === 'gamepad') {
+            this.scanGamepads();
+            this.renderGamepads();
+        } else if (this.mode === 'webusb' && this.usbDevice) {
+            this.renderUsbGrid();
         }
         
-        this.renderState();
+        this.updateMapVis();
     }
 
-    analyze(gp) {
-        // Check Axes
-        gp.axes.forEach((val, idx) => {
-            const id = `ax_${gp.index}_${idx}`;
-            const prev = this.cache[id];
-            
-            // Initial load
-            if (prev === undefined) {
-                this.cache[id] = val;
-                return;
+    renderUsbGrid() {
+        const c = document.getElementById('input-view');
+        if (!c.innerHTML.includes('byte-grid')) {
+            let h = `<div style="font-size:10px; color:#666; margin-bottom:10px;">USB RAW BYTES (${this.usbDevice.productName})</div><div class="byte-grid">`;
+            for(let i=0; i<32; i++) h += `<div class="byte-cell" id="byte-${i}" onclick="app.manualMap('webusb',0,${i})"><span class="byte-lbl">${i}</span><span class="byte-val">0</span></div>`;
+            h += '</div>';
+            c.innerHTML = h;
+        }
+
+        for(let i=0; i<32; i++) {
+            const val = this.usbData[i];
+            const el = document.getElementById(`byte-${i}`);
+            if (el) {
+                el.querySelector('.byte-val').innerText = val;
+                if (this.prevUsbData[i] !== val) el.classList.add('changed');
+                else el.classList.remove('changed');
+                
+                // Highlight mapped
+                let isMapped = false;
+                for(let k in this.config) if(this.config[k].mapped && this.config[k].src === 'webusb' && this.config[k].idx === i) isMapped=true;
+                if(isMapped) el.classList.add('mapped');
             }
-
-            // Check Delta (Significant change)
-            if (Math.abs(val - prev) > 0.05) {
-                this.log(gp.index, `Axis ${idx}`, val.toFixed(3));
-                this.cache[id] = val;
-            }
-        });
-
-        // Check Buttons
-        gp.buttons.forEach((btn, idx) => {
-            const id = `btn_${gp.index}_${idx}`;
-            const prev = this.cache[id];
-            const val = btn.value;
-
-            if (prev === undefined) {
-                this.cache[id] = val;
-                return;
-            }
-
-            if (Math.abs(val - prev) > 0.1) {
-                const type = btn.pressed ? "BTN DOWN" : "BTN UP";
-                this.log(gp.index, `${type} ${idx}`, val.toFixed(2));
-                this.cache[id] = val;
-            }
-        });
-    }
-
-    log(devIdx, msg, val) {
-        const div = document.createElement('div');
-        div.className = 'log-entry';
-        const time = new Date().toLocaleTimeString().split(' ')[0];
-        div.innerHTML = `
-            <span class="log-time">${time}</span>
-            <span class="log-dev">GP${devIdx}</span>
-            <span class="log-msg">${msg}</span>
-            <span class="log-val">${val}</span>
-        `;
-        this.logEl.insertBefore(div, this.logEl.firstChild);
-        
-        // Keep log clean
-        if(this.logEl.children.length > 50) {
-            this.logEl.removeChild(this.logEl.lastChild);
         }
     }
 
-    clear() {
-        this.logEl.innerHTML = '';
-    }
-
-    renderState() {
-        const c = document.getElementById('state-container');
-        document.getElementById('dev-count').innerText = `${this.devices.length} Devices`;
-
-        if (this.devices.length === 0) {
-            c.innerHTML = `<div style="padding:20px; color:#444;">No Gamepads Detected.<br>Press buttons to wake.</div>`;
-            return;
-        }
-
-        // Optimized Render: Just build HTML string
-        let html = '';
-        this.devices.forEach(gp => {
-            const shortId = gp.id.length > 25 ? gp.id.substring(0, 25) + '...' : gp.id;
-            
-            let axesHtml = '';
-            gp.axes.forEach((val, idx) => {
-                const pct = ((val + 1) / 2) * 100;
-                axesHtml += `
-                    <div class="axis-row">
-                        <span class="axis-idx">${idx}</span>
-                        <div class="axis-track">
-                            <div class="axis-fill" style="width:${pct}%"></div>
-                        </div>
-                        <span class="axis-val">${val.toFixed(2)}</span>
-                    </div>`;
+    renderGamepads() {
+        const c = document.getElementById('input-view');
+        // Simple string rebuild (performance ok for debug tool)
+        let html = `<div class="slot-scanner">Scanned Slots 0-4. Found ${this.gamepads.length} devices.</div>`;
+        
+        this.gamepads.forEach(gp => {
+            let axes = '';
+            gp.axes.forEach((v, i) => {
+                const w = ((v+1)/2)*100;
+                axes += `<div onclick="app.manualMap('gp', ${gp.index}, ${i})" style="cursor:pointer; margin-bottom:2px;">
+                    <div style="font-size:9px; color:#666; display:flex; justify-content:space-between;"><span>AX ${i}</span><span>${v.toFixed(2)}</span></div>
+                    <div class="axis-bar"><div class="axis-fill" style="width:${w}%"></div></div>
+                </div>`;
             });
+            html += `<div class="gp-card">
+                <div class="gp-head">${gp.id.substring(0,25)}... [IDX: ${gp.index}]</div>
+                ${axes}
+                <div style="font-size:9px; color:#aaa; margin-top:5px;">Buttons: ${gp.buttons.length}</div>
+            </div>`;
+        });
+        
+        if(this.gamepads.length === 0) html += `<div style="padding:20px; text-align:center; color:#444;">No Gamepads. Press buttons to wake.</div>`;
+        c.innerHTML = html;
+    }
 
-            let btnsHtml = '<div class="btn-grid">';
-            gp.buttons.forEach((btn, idx) => {
-                const cls = btn.pressed ? 'btn-cell active' : 'btn-cell';
-                btnsHtml += `<div class="${cls}">${idx}</div>`;
-            });
-            btnsHtml += '</div>';
+    updateMapVis() {
+        for(let k in CONTROLS) {
+            const c = this.config[k];
+            const el = document.getElementById(`vis-${k}`);
+            if (!c.mapped || !el) continue;
 
-            html += `
-                <div class="device-card">
-                    <div class="dev-header">${shortId}</div>
-                    <div class="dev-stats">Index: ${gp.index} | Mapping: "${gp.mapping}" | <strong>Axes: ${gp.axes.length}</strong> | Buttons: ${gp.buttons.length}</div>
-                    ${axesHtml}
-                    ${btnsHtml}
+            let val = 0;
+            if (c.src === 'gp') {
+                const gp = this.gamepads.find(g => g.index === c.id);
+                if(gp) val = gp.axes[c.idx] || 0;
+            } else if (c.src === 'webusb') {
+                val = this.usbData[c.idx] || 0;
+            }
+
+            // Normalize
+            let norm = (val - c.min) / (c.max - c.min);
+            norm = Math.max(0, Math.min(1, norm));
+            if (c.rev) norm = 1.0 - norm;
+            
+            el.style.width = `${norm*100}%`;
+        }
+    }
+
+    initUI() {
+        const c = document.getElementById('map-view');
+        c.innerHTML = '';
+        for(let k in CONTROLS) {
+            const conf = this.config[k];
+            const srcLbl = conf.mapped ? `${conf.src.toUpperCase()} [${conf.idx}]` : '-';
+            c.innerHTML += `
+                <div class="map-row">
+                    <div class="map-lbl">${CONTROLS[k].label}</div>
+                    <div class="map-src">${srcLbl}</div>
+                    <div class="map-vis"><div class="map-fill" id="vis-${k}"></div></div>
+                    <button class="btn-mini" id="btn-map-${k}" onclick="app.startMap('${k}')">MAP</button>
+                    <label style="font-size:9px; margin-left:5px; color:#666">
+                        <input type="checkbox" ${conf.rev?'checked':''} onchange="app.toggleRev('${k}')"> R
+                    </label>
                 </div>
             `;
-        });
-        c.innerHTML = html;
+        }
+    }
+
+    toggleRev(k) {
+        this.config[k].rev = !this.config[k].rev;
+        this.save();
+    }
+    
+    resetConfig() { localStorage.removeItem('flight_cfg_v6'); location.reload(); }
+    exportConfig() {
+        const blob = new Blob([JSON.stringify(this.config)], {type:'application/json'});
+        const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'flight_config.json'; a.click();
     }
 }
 
-window.logger = new Diagnostics();
+window.app = new App();
 </script>
 </body>
 </html>
