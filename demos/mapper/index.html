@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Flight Calibrator v6 - Direct USB</title>
+    <title>Flight Calibrator v7 - Deep Scan</title>
     <style>
         :root {
             --bg: #050505;
@@ -70,6 +70,12 @@
         .axis-bar { height: 6px; background: #333; margin: 2px 0; position: relative; }
         .axis-fill { height: 100%; background: #666; width: 0%; position: absolute; }
         .slot-scanner { font-size: 10px; color: #666; margin-bottom: 10px; padding: 5px; border: 1px dashed #333; }
+        
+        /* ANALOG BUTTONS */
+        .analog-btn-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(40px, 1fr)); gap: 4px; margin-top: 5px; }
+        .analog-btn { background: #222; padding: 3px; font-size: 9px; text-align: center; border: 1px solid #333; cursor:pointer;}
+        .analog-btn.active { border-color: var(--accent); background: #003333; color: #fff; }
+        .ab-val { display: block; font-weight: bold; color: var(--success); }
 
         /* MAPPING LIST */
         .map-row { display: flex; align-items: center; margin-bottom: 4px; background: #181818; padding: 5px; border-radius: 3px; }
@@ -90,7 +96,7 @@
 <body>
 
 <header>
-    <h1>Flight Calibrator v6 <span style="font-size:10px; color:#555">DIRECT USB EDITION</span></h1>
+    <h1>Flight Calibrator v7 <span style="font-size:10px; color:#555">DEEP SCAN</span></h1>
     <div class="tabs">
         <button class="tab active" onclick="app.setTab('gamepad')" id="tab-gamepad">Gamepad API</button>
         <button class="tab" onclick="app.setTab('webusb')" id="tab-webusb">WebUSB (Direct)</button>
@@ -124,8 +130,8 @@
 
 <script>
 /**
- * FLIGHT CALIBRATOR v6
- * Features: WebUSB Direct Parsing, Hybrid Input (GP+USB), Brute Force Scanning
+ * FLIGHT CALIBRATOR v7
+ * Features: Analog Button Scanning, WebUSB Error Handling
  */
 
 const CONTROLS = {
@@ -155,30 +161,31 @@ class App {
 
     loadConfig() {
         try {
-            return JSON.parse(localStorage.getItem('flight_cfg_v6')) || this.defaultConfig();
+            return JSON.parse(localStorage.getItem('flight_cfg_v7')) || this.defaultConfig();
         } catch(e) { return this.defaultConfig(); }
     }
 
     defaultConfig() {
         const c = {};
-        for(let k in CONTROLS) c[k] = { mapped: false, src: 'gp', id: 0, idx: 0, min: -1, max: 1, rev: CONTROLS[k].reverse||false };
+        for(let k in CONTROLS) c[k] = { mapped: false, src: 'gp', id: 0, idx: 0, subType: 'axis', min: -1, max: 1, rev: CONTROLS[k].reverse||false };
         return c;
     }
 
-    save() { localStorage.setItem('flight_cfg_v6', JSON.stringify(this.config)); }
+    save() { localStorage.setItem('flight_cfg_v7', JSON.stringify(this.config)); }
 
     setTab(m) {
         this.mode = m;
         document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
         document.getElementById(`tab-${m}`).classList.add('active');
         document.getElementById('usb-conn-btn').style.display = m === 'webusb' ? 'block' : 'none';
+        document.getElementById('err-log').style.display = 'none';
         
         const view = document.getElementById('input-view');
         if (m === 'webusb' && !this.usbDevice) {
             view.innerHTML = `<div style="padding:20px; text-align:center; color:#666;">
                 <p><strong>Direct USB Mode</strong></p>
-                <p>Attempts to bypass Android Gamepad driver.</p>
-                <p>Click "CONNECT USB" to start.</p>
+                <p>Note: On Quest, the OS usually locks HID devices, causing failures.</p>
+                <p>Click "CONNECT USB" to attempt access.</p>
             </div>`;
         }
     }
@@ -187,25 +194,24 @@ class App {
     async connectWebUSB() {
         try {
             document.getElementById('err-log').style.display = 'none';
-            // Filter for Thrustmaster (0x044f)
             const device = await navigator.usb.requestDevice({ filters: [{ vendorId: 0x044f }] });
             await device.open();
             
-            // Auto-select config 1
             if (device.configuration === null) await device.selectConfiguration(1);
             
-            // Find Interrupt IN Endpoint
             const intf = device.configuration.interfaces[0];
             const alt = intf.alternates[0];
             const ep = alt.endpoints.find(e => e.direction === 'in' && e.type === 'interrupt');
             
             if (!ep) throw new Error("No Interrupt IN endpoint found.");
-            
             this.usbEndpoint = ep.endpointNumber;
             
-            // DANGEROUS STEP: Claim Interface
-            // If Android OS owns this, this line will throw SecurityError
-            await device.claimInterface(intf.interfaceNumber);
+            // Try to claim, but catch OS lock error
+            try {
+                await device.claimInterface(intf.interfaceNumber);
+            } catch(e) {
+                throw new Error("OS Driver Locked: The Quest OS has exclusive control of this device. Please use Gamepad API tab and check Analog Buttons.");
+            }
             
             this.usbDevice = device;
             this.readUSBLoop(device, this.usbEndpoint);
@@ -213,8 +219,7 @@ class App {
         } catch (e) {
             const err = document.getElementById('err-log');
             err.style.display = 'block';
-            err.innerHTML = `<strong>USB Error:</strong> ${e.name} - ${e.message}<br>
-            If "SecurityError" or "NetworkError": The Android OS has locked this device driver. We cannot bypass it.`;
+            err.innerHTML = `<strong>USB Error:</strong> ${e.message}`;
         }
     }
 
@@ -229,70 +234,53 @@ class App {
                     }
                     if (this.mapTarget && this.mapTarget.src === 'webusb') this.checkUsbMap();
                 }
-            } catch (e) {
-                console.error("USB Read Error", e);
-                break;
-            }
+            } catch (e) { break; }
         }
     }
 
     // --- GAMEPAD LOGIC ---
     scanGamepads() {
-        // Brute Force Scan Indices 0-4
         const gps = navigator.getGamepads ? navigator.getGamepads() : [];
         this.gamepads = [];
-        // Explicitly check first 4 slots even if length is reported weirdly
-        for(let i=0; i<5; i++) {
+        // Deep Scan 8 slots
+        for(let i=0; i<8; i++) {
             if (gps[i]) this.gamepads.push(gps[i]);
         }
     }
 
-    // --- MAPPING ---
     startMap(key) {
-        this.mapTarget = { key: key, src: this.mode }; // Map from current view source
+        this.mapTarget = { key: key, src: this.mode };
         const btn = document.getElementById(`btn-map-${key}`);
         if(btn) { btn.innerText = "MOVE..."; btn.classList.add('active'); }
     }
 
     checkUsbMap() {
-        // Find changed byte
         for(let i=0; i<64; i++) {
-            if (Math.abs(this.usbData[i] - this.prevUsbData[i]) > 5) { // Threshold
-                this.applyMap(this.mapTarget.key, 'webusb', 0, i); // ID 0, Index = Byte Offset
+            if (Math.abs(this.usbData[i] - this.prevUsbData[i]) > 5) {
+                this.applyMap(this.mapTarget.key, 'webusb', 0, i, 'byte');
                 return;
             }
         }
     }
 
-    checkGpMap() {
-        // Find changed axis/btn
-        this.gamepads.forEach(gp => {
-            // Axes
-            gp.axes.forEach((val, idx) => {
-                // We need history to detect change, simplified here to "Active" check for demo
-                // Ideally we'd store GP history like we did in v4.
-                // For v6, user manually clicks axis in UI or we assume significant motion
-                if (Math.abs(val) > 0.5) { 
-                    // this.applyMap(this.mapTarget.key, 'gp', gp.index, idx); 
-                }
-            });
-        });
-    }
-
-    manualMap(src, id, idx) {
+    manualMap(src, id, idx, subType) {
         if(this.mapTarget) {
-            this.applyMap(this.mapTarget.key, src, id, idx);
+            this.applyMap(this.mapTarget.key, src, id, idx, subType);
         }
     }
 
-    applyMap(key, src, id, idx) {
+    applyMap(key, src, id, idx, subType) {
         const c = this.config[key];
         c.mapped = true;
         c.src = src;
         c.id = id;
         c.idx = idx;
-        c.min = src === 'webusb' ? 0 : -1;
-        c.max = src === 'webusb' ? 255 : 1;
+        c.subType = subType; // 'axis', 'button', 'byte'
+        
+        // Default ranges
+        if (src === 'webusb') { c.min = 0; c.max = 255; }
+        else if (subType === 'button') { c.min = 0; c.max = 1; }
+        else { c.min = -1; c.max = 1; } // axis
         
         this.mapTarget = null;
         this.save();
@@ -309,7 +297,6 @@ class App {
         } else if (this.mode === 'webusb' && this.usbDevice) {
             this.renderUsbGrid();
         }
-        
         this.updateMapVis();
     }
 
@@ -317,11 +304,10 @@ class App {
         const c = document.getElementById('input-view');
         if (!c.innerHTML.includes('byte-grid')) {
             let h = `<div style="font-size:10px; color:#666; margin-bottom:10px;">USB RAW BYTES (${this.usbDevice.productName})</div><div class="byte-grid">`;
-            for(let i=0; i<32; i++) h += `<div class="byte-cell" id="byte-${i}" onclick="app.manualMap('webusb',0,${i})"><span class="byte-lbl">${i}</span><span class="byte-val">0</span></div>`;
+            for(let i=0; i<32; i++) h += `<div class="byte-cell" id="byte-${i}" onclick="app.manualMap('webusb',0,${i}, 'byte')"><span class="byte-lbl">${i}</span><span class="byte-val">0</span></div>`;
             h += '</div>';
             c.innerHTML = h;
         }
-
         for(let i=0; i<32; i++) {
             const val = this.usbData[i];
             const el = document.getElementById(`byte-${i}`);
@@ -329,33 +315,40 @@ class App {
                 el.querySelector('.byte-val').innerText = val;
                 if (this.prevUsbData[i] !== val) el.classList.add('changed');
                 else el.classList.remove('changed');
-                
-                // Highlight mapped
-                let isMapped = false;
-                for(let k in this.config) if(this.config[k].mapped && this.config[k].src === 'webusb' && this.config[k].idx === i) isMapped=true;
-                if(isMapped) el.classList.add('mapped');
             }
         }
     }
 
     renderGamepads() {
         const c = document.getElementById('input-view');
-        // Simple string rebuild (performance ok for debug tool)
-        let html = `<div class="slot-scanner">Scanned Slots 0-4. Found ${this.gamepads.length} devices.</div>`;
+        let html = `<div class="slot-scanner">Scanned Slots 0-7. Found ${this.gamepads.length} devices. Check Buttons for hidden Axes.</div>`;
         
         this.gamepads.forEach(gp => {
             let axes = '';
             gp.axes.forEach((v, i) => {
                 const w = ((v+1)/2)*100;
-                axes += `<div onclick="app.manualMap('gp', ${gp.index}, ${i})" style="cursor:pointer; margin-bottom:2px;">
+                axes += `<div onclick="app.manualMap('gp', ${gp.index}, ${i}, 'axis')" style="cursor:pointer; margin-bottom:2px;">
                     <div style="font-size:9px; color:#666; display:flex; justify-content:space-between;"><span>AX ${i}</span><span>${v.toFixed(2)}</span></div>
                     <div class="axis-bar"><div class="axis-fill" style="width:${w}%"></div></div>
                 </div>`;
             });
+
+            // ANALOG BUTTON GRID
+            let btns = '<div style="font-size:9px; color:#666; margin-top:5px;">BUTTONS (Click to Map)</div><div class="analog-btn-grid">';
+            gp.buttons.forEach((b, i) => {
+                const val = b.value.toFixed(2);
+                const isActive = b.value > 0.05;
+                const cls = isActive ? 'analog-btn active' : 'analog-btn';
+                btns += `<div class="${cls}" onclick="app.manualMap('gp', ${gp.index}, ${i}, 'button')">
+                    B${i}<span class="ab-val">${val}</span>
+                </div>`;
+            });
+            btns += '</div>';
+
             html += `<div class="gp-card">
                 <div class="gp-head">${gp.id.substring(0,25)}... [IDX: ${gp.index}]</div>
                 ${axes}
-                <div style="font-size:9px; color:#aaa; margin-top:5px;">Buttons: ${gp.buttons.length}</div>
+                ${btns}
             </div>`;
         });
         
@@ -372,7 +365,10 @@ class App {
             let val = 0;
             if (c.src === 'gp') {
                 const gp = this.gamepads.find(g => g.index === c.id);
-                if(gp) val = gp.axes[c.idx] || 0;
+                if(gp) {
+                    if (c.subType === 'button') val = gp.buttons[c.idx] ? gp.buttons[c.idx].value : 0;
+                    else val = gp.axes[c.idx] || 0;
+                }
             } else if (c.src === 'webusb') {
                 val = this.usbData[c.idx] || 0;
             }
@@ -391,7 +387,7 @@ class App {
         c.innerHTML = '';
         for(let k in CONTROLS) {
             const conf = this.config[k];
-            const srcLbl = conf.mapped ? `${conf.src.toUpperCase()} [${conf.idx}]` : '-';
+            const srcLbl = conf.mapped ? `${conf.src.toUpperCase()} [${conf.subType === 'button' ? 'BTN' : 'AX'} ${conf.idx}]` : '-';
             c.innerHTML += `
                 <div class="map-row">
                     <div class="map-lbl">${CONTROLS[k].label}</div>
@@ -411,7 +407,7 @@ class App {
         this.save();
     }
     
-    resetConfig() { localStorage.removeItem('flight_cfg_v6'); location.reload(); }
+    resetConfig() { localStorage.removeItem('flight_cfg_v7'); location.reload(); }
     exportConfig() {
         const blob = new Blob([JSON.stringify(this.config)], {type:'application/json'});
         const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'flight_config.json'; a.click();
