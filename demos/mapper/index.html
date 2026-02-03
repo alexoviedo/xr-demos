@@ -160,6 +160,12 @@
         .calib-range-fill {
             height: 4px; background: var(--accent); position: absolute; top: 8px; opacity: 0.8;
         }
+        #listening-feedback {
+            font-family: monospace;
+            color: var(--warn);
+            margin: 10px 0;
+            min-height: 1.2em;
+        }
 
     </style>
 </head>
@@ -343,6 +349,7 @@ class CalibratorApp {
         this.showModal(`
             <h2 style="color:var(--warn)">Listening...</h2>
             <p>Move <strong>${FLIGHT_FUNCTIONS[funcId].label}</strong> significantly.</p>
+            <div id="listening-feedback">Strongest Signal: --</div>
             <button onclick="app.cancelModal()">Cancel</button>
         `);
     }
@@ -359,8 +366,12 @@ class CalibratorApp {
 
     detectMappingInput() {
         const def = FLIGHT_FUNCTIONS[this.state.targetFunc];
-        const threshold = 0.5;
+        // Lower threshold for Quest/Android where range might be smaller or partial
+        const threshold = 0.15; 
         
+        let maxDelta = 0;
+        let signalInfo = "--";
+
         for(let i=0; i<this.devices.length; i++) {
             const gp = this.devices[i];
             if(!gp) continue;
@@ -369,19 +380,40 @@ class CalibratorApp {
 
             if (def.type === 'axis') {
                 for(let a=0; a<gp.axes.length; a++) {
-                    if (Math.abs(gp.axes[a] - base.axes[a]) > threshold) {
+                    const delta = Math.abs(gp.axes[a] - base.axes[a]);
+                    
+                    // Update max signal for feedback
+                    if (delta > maxDelta) {
+                        maxDelta = delta;
+                        signalInfo = `Axis ${a} (${(delta*100).toFixed(0)}%)`;
+                    }
+
+                    if (delta > threshold) {
                         this.finishMap(gp.id, a);
                         return;
                     }
                 }
             } else {
                 for(let b=0; b<gp.buttons.length; b++) {
-                    if (Math.abs(gp.buttons[b].value - base.buttons[b]) > 0.5) {
+                    const delta = Math.abs(gp.buttons[b].value - base.buttons[b]);
+                    
+                    if (delta > maxDelta) {
+                        maxDelta = delta;
+                        signalInfo = `Btn ${b} (${(delta*100).toFixed(0)}%)`;
+                    }
+
+                    if (delta > 0.5) {
                         this.finishMap(gp.id, b);
                         return;
                     }
                 }
             }
+        }
+
+        // Update feedback UI
+        const fbEl = document.getElementById('listening-feedback');
+        if (fbEl && maxDelta > 0.02) {
+            fbEl.innerText = `Strongest Signal: ${signalInfo}`;
         }
     }
 
