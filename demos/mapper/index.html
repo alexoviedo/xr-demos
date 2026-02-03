@@ -3,14 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Flight Calibrator v3 - Deep Probe</title>
+    <title>Flight Calibrator v4 - Event Logger</title>
     <style>
         :root {
-            --bg: #050505;
-            --panel: #141414;
-            --text: #e0e0e0;
-            --accent: #00ff9d;
-            --changed: #00ff00;
+            --bg: #000000;
+            --panel: #111;
+            --text: #eee;
+            --accent: #00ff00;
+            --highlight: #ccff00;
+            --dim: #555;
             --border: #333;
         }
         body {
@@ -26,41 +27,42 @@
             flex-direction: column;
         }
         
-        /* Layout */
-        .header {
+        /* Header */
+        header {
             display: flex;
             justify-content: space-between;
             align-items: center;
             padding-bottom: 10px;
-            border-bottom: 1px solid var(--border);
+            border-bottom: 2px solid var(--border);
             margin-bottom: 10px;
         }
-        .main-split {
+        h1 { margin:0; font-size: 18px; color: var(--accent); text-transform: uppercase; letter-spacing: 2px; }
+
+        /* Main Split */
+        .workspace {
             display: grid;
-            grid-template-columns: 1fr 1fr; /* 50/50 split for more data visibility */
-            gap: 10px;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
             flex-grow: 1;
             overflow: hidden;
         }
-        
+
         /* Panels */
         .panel {
             background: var(--panel);
             border: 1px solid var(--border);
-            border-radius: 4px;
             display: flex;
             flex-direction: column;
             overflow: hidden;
         }
         .panel-head {
             background: #222;
-            padding: 8px 12px;
+            padding: 8px;
             font-size: 12px;
             font-weight: bold;
-            color: #888;
             border-bottom: 1px solid var(--border);
-            display: flex;
-            justify-content: space-between;
+            color: var(--accent);
+            display: flex; justify-content: space-between;
         }
         .panel-body {
             padding: 10px;
@@ -68,490 +70,211 @@
             flex-grow: 1;
         }
 
-        /* Matrix Data Grid */
-        .device-block {
-            margin-bottom: 20px;
-            border-bottom: 1px dashed #333;
-            padding-bottom: 10px;
+        /* Device Cards */
+        .device-card {
+            margin-bottom: 15px;
+            border: 1px solid var(--dim);
+            padding: 8px;
         }
-        .device-title { color: var(--accent); font-weight: bold; margin-bottom: 5px; font-size: 12px; }
-        
-        .data-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(60px, 1fr));
-            gap: 4px;
+        .dev-header {
+            font-weight: bold; color: #fff; margin-bottom: 5px; font-size: 12px;
+            border-bottom: 1px solid #333; padding-bottom: 4px;
         }
-        .data-cell {
-            background: #1a1a1a;
-            padding: 4px;
-            border-radius: 2px;
-            font-size: 10px;
-            text-align: center;
-            transition: background 0.5s;
-        }
-        .data-cell.changed {
-            background: #004400; /* Dark green background */
-            color: #fff;
-            transition: none; /* Instant on */
-        }
-        .data-cell.active-input {
-            background: var(--changed);
-            color: #000;
-            font-weight: bold;
-        }
-        .cell-label { color: #666; font-size: 8px; display: block; }
-        .cell-val { display: block; margin-top: 2px; }
+        .dev-stats { font-size: 10px; color: #888; margin-bottom: 8px; }
 
-        /* Mapping UI */
-        .map-row {
+        /* Axis Bars */
+        .axis-row { display: flex; align-items: center; font-size: 10px; margin-bottom: 2px; }
+        .axis-idx { width: 30px; color: #888; }
+        .axis-track { flex-grow: 1; height: 10px; background: #333; margin: 0 5px; position: relative; }
+        .axis-fill { height: 100%; background: var(--accent); position: absolute; }
+        .axis-val { width: 35px; text-align: right; color: #fff; }
+
+        /* Button Grid */
+        .btn-grid { display: flex; flex-wrap: wrap; gap: 2px; margin-top: 5px; }
+        .btn-cell {
+            width: 20px; height: 15px; background: #333; font-size: 9px;
+            display: flex; align-items: center; justify-content: center; color: #888;
+        }
+        .btn-cell.active { background: var(--highlight); color: #000; font-weight: bold; }
+
+        /* Event Log */
+        .log-entry {
+            font-size: 11px;
+            padding: 3px 0;
+            border-bottom: 1px solid #222;
             display: flex;
-            align-items: center;
-            background: #1a1a1a;
-            margin-bottom: 4px;
-            padding: 6px;
-            border-radius: 4px;
         }
-        .map-label { width: 100px; font-size: 11px; font-weight: bold; }
-        .map-info { flex-grow: 1; font-size: 10px; color: #aaa; padding: 0 10px; }
-        .map-vis {
-            width: 100px; height: 6px; background: #333; margin: 0 10px; position: relative;
-        }
-        .map-fill { height: 100%; background: var(--accent); width: 0%; position: absolute; }
-        
-        button {
-            background: #333; border: 1px solid #555; color: #fff;
-            padding: 4px 10px; cursor: pointer; font-size: 10px;
-            border-radius: 3px;
-        }
-        button:hover { background: #555; }
-        button.primary { background: #005533; border-color: var(--accent); color: var(--accent); }
-        
-        /* Modal */
-        #modal-overlay {
-            position: fixed; top:0; left:0; width:100%; height:100%;
-            background: rgba(0,0,0,0.9);
-            display: none; justify-content: center; align-items: center; z-index: 100;
-        }
-        .modal-box {
-            background: #222; border: 1px solid var(--accent); padding: 20px;
-            width: 300px; text-align: center;
-        }
+        .log-time { color: #666; width: 60px; }
+        .log-dev { color: var(--accent); width: 40px; }
+        .log-msg { color: #fff; flex-grow: 1; }
+        .log-val { color: var(--highlight); width: 50px; text-align: right; }
 
     </style>
 </head>
 <body>
 
-<div class="header">
-    <div>
-        <strong style="color:var(--accent)">Flight Calibrator v3</strong>
-        <span style="font-size:10px; color:#666; margin-left:10px;">MATRIX MODE</span>
-    </div>
-    <div>
-        <button onclick="app.resetConfig()" style="color:#ff5555; border-color:#552222;">Reset</button>
-        <button onclick="app.exportConfig()">Export JSON</button>
-    </div>
-</div>
+<header>
+    <h1>Input Diagnostics</h1>
+    <div style="font-size: 10px; color: #888;">QUEST DEBUGGER</div>
+</header>
 
-<div class="main-split">
-    <!-- LEFT: THE MATRIX (Raw Data) -->
+<div class="workspace">
+    <!-- LEFT: STATE INSPECTOR -->
     <div class="panel">
         <div class="panel-head">
-            <span>RAW INPUT MATRIX</span>
-            <span id="dev-count">0 Devices</span>
+            <span>LIVE STATE</span>
+            <span id="dev-count">Scanning...</span>
         </div>
-        <div class="panel-body" id="matrix-container">
-            <!-- Injected by JS -->
-        </div>
+        <div class="panel-body" id="state-container"></div>
     </div>
 
-    <!-- RIGHT: MAPPING -->
+    <!-- RIGHT: EVENT LOG -->
     <div class="panel">
         <div class="panel-head">
-            <span>CONTROL MAPPING</span>
-            <button class="primary" onclick="app.autoDetect()">Auto-Detect</button>
+            <span>CHANGE LOG (MOVE RUDDER NOW)</span>
+            <button onclick="logger.clear()" style="background:#333; border:none; color:#fff; cursor:pointer;">Clear</button>
         </div>
-        <div class="panel-body" id="mapping-container">
-            <!-- Injected by JS -->
+        <div class="panel-body" id="log-container">
+            <div style="color:#666; font-style:italic;">Waiting for input changes...</div>
         </div>
     </div>
-</div>
-
-<div id="modal-overlay">
-    <div class="modal-box" id="modal-content"></div>
 </div>
 
 <script>
-
-const FUNCTIONS = {
-    pitch: { label: "Pitch (Y)", type: "axis" },
-    roll: { label: "Roll (X)", type: "axis" },
-    yaw: { label: "Yaw/Rudder", type: "axis" },
-    throttle: { label: "Throttle", type: "axis", reverse: true },
-    leftBrake: { label: "L-Brake", type: "axis" },
-    rightBrake: { label: "R-Brake", type: "axis" },
-    trigger: { label: "Trigger", type: "button" }
-};
-
-class Calibrator {
+class Diagnostics {
     constructor() {
-        this.config = this.loadConfig();
-        this.prevValues = {}; // For change detection highlighting
+        this.cache = {}; // Store previous values to detect changes
         this.devices = [];
-        this.state = { mode: 'idle', target: null, tempMin:0, tempMax:0, baselines: {} };
-        
-        this.initUI();
+        this.logEl = document.getElementById('log-container');
         this.loop();
     }
 
-    loadConfig() {
-        const stored = localStorage.getItem('flight_config_v3');
-        if (stored) return JSON.parse(stored);
-        
-        const fresh = {};
-        for(let key in FUNCTIONS) {
-            fresh[key] = {
-                mapped: false,
-                devId: null,
-                idx: 0,
-                type: FUNCTIONS[key].type, // 'axis' or 'button'
-                min: -1,
-                max: 1,
-                reverse: FUNCTIONS[key].reverse || false
-            };
-        }
-        return fresh;
-    }
-
-    save() {
-        localStorage.setItem('flight_config_v3', JSON.stringify(this.config));
-    }
-
-    resetConfig() {
-        if(confirm("Reset all mappings?")) {
-            localStorage.removeItem('flight_config_v3');
-            location.reload();
-        }
-    }
-
-    // --- MAIN LOOP ---
     loop() {
         requestAnimationFrame(() => this.loop());
         
         const gps = navigator.getGamepads ? navigator.getGamepads() : [];
         this.devices = [];
-        for(let i=0; i<gps.length; i++) if(gps[i]) this.devices.push(gps[i]);
-
-        this.renderMatrix();
-        this.updateMappingVisuals();
-
-        if (this.state.mode === 'mapping') this.checkMapInput();
-        if (this.state.mode === 'calibrating') this.updateCalibInput();
+        
+        // Scan
+        for(let i=0; i<gps.length; i++) {
+            const gp = gps[i];
+            if(gp) {
+                this.devices.push(gp);
+                this.analyze(gp);
+            }
+        }
+        
+        this.renderState();
     }
 
-    // --- MATRIX RENDERER (The Debugger) ---
-    renderMatrix() {
-        const container = document.getElementById('matrix-container');
-        document.getElementById('dev-count').innerText = `${this.devices.length} Connected`;
+    analyze(gp) {
+        // Check Axes
+        gp.axes.forEach((val, idx) => {
+            const id = `ax_${gp.index}_${idx}`;
+            const prev = this.cache[id];
+            
+            // Initial load
+            if (prev === undefined) {
+                this.cache[id] = val;
+                return;
+            }
+
+            // Check Delta (Significant change)
+            if (Math.abs(val - prev) > 0.05) {
+                this.log(gp.index, `Axis ${idx}`, val.toFixed(3));
+                this.cache[id] = val;
+            }
+        });
+
+        // Check Buttons
+        gp.buttons.forEach((btn, idx) => {
+            const id = `btn_${gp.index}_${idx}`;
+            const prev = this.cache[id];
+            const val = btn.value;
+
+            if (prev === undefined) {
+                this.cache[id] = val;
+                return;
+            }
+
+            if (Math.abs(val - prev) > 0.1) {
+                const type = btn.pressed ? "BTN DOWN" : "BTN UP";
+                this.log(gp.index, `${type} ${idx}`, val.toFixed(2));
+                this.cache[id] = val;
+            }
+        });
+    }
+
+    log(devIdx, msg, val) {
+        const div = document.createElement('div');
+        div.className = 'log-entry';
+        const time = new Date().toLocaleTimeString().split(' ')[0];
+        div.innerHTML = `
+            <span class="log-time">${time}</span>
+            <span class="log-dev">GP${devIdx}</span>
+            <span class="log-msg">${msg}</span>
+            <span class="log-val">${val}</span>
+        `;
+        this.logEl.insertBefore(div, this.logEl.firstChild);
+        
+        // Keep log clean
+        if(this.logEl.children.length > 50) {
+            this.logEl.removeChild(this.logEl.lastChild);
+        }
+    }
+
+    clear() {
+        this.logEl.innerHTML = '';
+    }
+
+    renderState() {
+        const c = document.getElementById('state-container');
+        document.getElementById('dev-count').innerText = `${this.devices.length} Devices`;
 
         if (this.devices.length === 0) {
-            container.innerHTML = `<div style="padding:20px; text-align:center; color:#444;">Connect Hardware...</div>`;
+            c.innerHTML = `<div style="padding:20px; color:#444;">No Gamepads Detected.<br>Press buttons to wake.</div>`;
             return;
         }
 
-        // We rebuild DOM only if device count changes to keep it performant, 
-        // OR we just use direct DOM updates for values.
-        // For simplicity in this single-file, we'll regenerate the HTML strings but use caching for values
-        
+        // Optimized Render: Just build HTML string
         let html = '';
-        
-        this.devices.forEach((gp) => {
-            const shortId = gp.id.length > 30 ? gp.id.substring(0, 30) + '...' : gp.id;
+        this.devices.forEach(gp => {
+            const shortId = gp.id.length > 25 ? gp.id.substring(0, 25) + '...' : gp.id;
             
-            // AXES
-            let axesHtml = '<div style="font-size:10px; color:#666; margin-top:5px;">AXES</div><div class="data-grid">';
+            let axesHtml = '';
             gp.axes.forEach((val, idx) => {
-                const key = `${gp.id}_a_${idx}`;
-                const prev = this.prevValues[key] !== undefined ? this.prevValues[key] : val;
-                const changed = Math.abs(val - prev) > 0.002;
-                this.prevValues[key] = val; // update cache
-                
-                const cls = changed ? 'data-cell changed' : 'data-cell';
+                const pct = ((val + 1) / 2) * 100;
                 axesHtml += `
-                    <div class="${cls}">
-                        <span class="cell-label">AX ${idx}</span>
-                        <span class="cell-val">${val.toFixed(2)}</span>
+                    <div class="axis-row">
+                        <span class="axis-idx">${idx}</span>
+                        <div class="axis-track">
+                            <div class="axis-fill" style="width:${pct}%"></div>
+                        </div>
+                        <span class="axis-val">${val.toFixed(2)}</span>
                     </div>`;
             });
-            axesHtml += '</div>';
 
-            // BUTTONS
-            let btnsHtml = '<div style="font-size:10px; color:#666; margin-top:5px;">BUTTONS</div><div class="data-grid">';
+            let btnsHtml = '<div class="btn-grid">';
             gp.buttons.forEach((btn, idx) => {
-                const val = btn.value;
-                const key = `${gp.id}_b_${idx}`;
-                const prev = this.prevValues[key] !== undefined ? this.prevValues[key] : val;
-                const changed = Math.abs(val - prev) > 0.01;
-                this.prevValues[key] = val;
-
-                // Highlight if pressed or changing analog value
-                let cls = 'data-cell';
-                if (btn.pressed) cls += ' active-input';
-                else if (changed) cls += ' changed';
-
-                btnsHtml += `
-                    <div class="${cls}">
-                        <span class="cell-label">B ${idx}</span>
-                        <span class="cell-val">${val.toFixed(2)}</span>
-                    </div>`;
+                const cls = btn.pressed ? 'btn-cell active' : 'btn-cell';
+                btnsHtml += `<div class="${cls}">${idx}</div>`;
             });
             btnsHtml += '</div>';
 
-            html += `<div class="device-block">
-                <div class="device-title">${shortId} (Idx: ${gp.index})</div>
-                ${axesHtml}
-                ${btnsHtml}
-            </div>`;
-        });
-
-        container.innerHTML = html;
-    }
-
-    // --- MAPPING LOGIC ---
-    startMap(key) {
-        this.state.mode = 'mapping';
-        this.state.target = key;
-        
-        // Capture baseline
-        this.state.baselines = {};
-        this.devices.forEach(d => {
-            this.state.baselines[d.id] = { axes: [...d.axes], buttons: d.buttons.map(b=>b.value) };
-        });
-
-        this.showModal(`
-            <h3 style="color:var(--accent)">Mapping ${FUNCTIONS[key].label}</h3>
-            <p>Move the control significantly.</p>
-            <div id="map-feedback" style="font-family:monospace; color:var(--changed)">Waiting...</div>
-            <button onclick="app.cancelModal()" style="margin-top:20px">Cancel</button>
-        `);
-    }
-
-    checkMapInput() {
-        // Lower threshold for Quest
-        const THRESHOLD = 0.15; 
-        let maxDelta = 0;
-        let signalMsg = "Waiting...";
-
-        this.devices.forEach(gp => {
-            const base = this.state.baselines[gp.id];
-            if (!base) return;
-
-            // Check Axes
-            gp.axes.forEach((val, idx) => {
-                const delta = Math.abs(val - base.axes[idx]);
-                if (delta > maxDelta) {
-                    maxDelta = delta;
-                    signalMsg = `Signal: Axis ${idx} (${(delta*100).toFixed(0)}%)`;
-                }
-                if (delta > THRESHOLD) {
-                    this.applyMap(this.state.target, gp.id, idx, 'axis');
-                }
-            });
-
-            // Check Buttons (Pedals might map to analog buttons on Android)
-            gp.buttons.forEach((btn, idx) => {
-                const delta = Math.abs(btn.value - base.buttons[idx]);
-                if (delta > maxDelta) {
-                    maxDelta = delta;
-                    signalMsg = `Signal: Btn ${idx} (${(delta*100).toFixed(0)}%)`;
-                }
-                if (delta > 0.5) {
-                    this.applyMap(this.state.target, gp.id, idx, 'button');
-                }
-            });
-        });
-
-        const fb = document.getElementById('map-feedback');
-        if(fb) fb.innerText = signalMsg;
-    }
-
-    applyMap(funcKey, devId, idx, type) {
-        this.config[funcKey].mapped = true;
-        this.config[funcKey].devId = devId;
-        this.config[funcKey].idx = idx;
-        this.config[funcKey].type = type;
-        this.config[funcKey].min = -1; // Reset calib
-        this.config[funcKey].max = 1;
-        this.save();
-        this.cancelModal();
-        this.initUI(); // refresh
-    }
-
-    // --- CALIBRATION LOGIC ---
-    startCalib(key) {
-        if(!this.config[key].mapped) return;
-        this.state.mode = 'calibrating';
-        this.state.target = key;
-        this.state.tempMin = 1;
-        this.state.tempMax = -1;
-
-        this.showModal(`
-            <h3 style="color:var(--accent)">Calibrate ${FUNCTIONS[key].label}</h3>
-            <p>Sweep MIN to MAX</p>
-            <div style="font-family:monospace; font-size:16px; margin:10px 0;">
-                <span id="cal-min" style="color:#ff5555">0.00</span> 
-                <span style="color:#666"> &lt; </span> 
-                <span id="cal-curr" style="color:#fff; font-weight:bold;">0.00</span>
-                <span style="color:#666"> &gt; </span> 
-                <span id="cal-max" style="color:var(--accent)">0.00</span>
-            </div>
-            <button class="primary" onclick="app.finishCalib()">Save Range</button>
-            <button onclick="app.cancelModal()">Cancel</button>
-        `);
-    }
-
-    updateCalibInput() {
-        const cfg = this.config[this.state.target];
-        const gp = this.devices.find(d => d.id === cfg.devId);
-        if(!gp) return;
-
-        let val = (cfg.type === 'axis') ? gp.axes[cfg.idx] : gp.buttons[cfg.idx].value;
-
-        if (val < this.state.tempMin) this.state.tempMin = val;
-        if (val > this.state.tempMax) this.state.tempMax = val;
-
-        document.getElementById('cal-curr').innerText = val.toFixed(2);
-        document.getElementById('cal-min').innerText = this.state.tempMin.toFixed(2);
-        document.getElementById('cal-max').innerText = this.state.tempMax.toFixed(2);
-    }
-
-    finishCalib() {
-        const cfg = this.config[this.state.target];
-        // Ensure some range exists
-        if (this.state.tempMax - this.state.tempMin < 0.1) {
-            this.state.tempMin = -1; this.state.tempMax = 1;
-        }
-        cfg.min = this.state.tempMin;
-        cfg.max = this.state.tempMax;
-        this.save();
-        this.cancelModal();
-        this.initUI();
-    }
-
-    // --- UI HELPERS ---
-    initUI() {
-        const c = document.getElementById('mapping-container');
-        c.innerHTML = '';
-        
-        Object.keys(FUNCTIONS).forEach(key => {
-            const def = FUNCTIONS[key];
-            const cfg = this.config[key];
-
-            let status = "Unmapped";
-            let calBtn = '';
-            let mapStyle = '';
-
-            if (cfg.mapped) {
-                const shortId = cfg.devId.length > 10 ? '..'+cfg.devId.slice(-10) : cfg.devId;
-                const inputName = cfg.type === 'axis' ? `AX ${cfg.idx}` : `BTN ${cfg.idx}`;
-                status = `${shortId} [${inputName}]`;
-                calBtn = `<button onclick="app.startCalib('${key}')">CAL</button>`;
-                mapStyle = `border-left: 3px solid var(--accent);`;
-            }
-
-            const div = document.createElement('div');
-            div.className = 'map-row';
-            div.style = mapStyle;
-            div.innerHTML = `
-                <div class="map-label">${def.label}</div>
-                <div class="map-info">${status}</div>
-                <div class="map-vis">
-                    <div class="map-fill" id="vis-${key}"></div>
+            html += `
+                <div class="device-card">
+                    <div class="dev-header">${shortId}</div>
+                    <div class="dev-stats">Index: ${gp.index} | Mapping: "${gp.mapping}" | <strong>Axes: ${gp.axes.length}</strong> | Buttons: ${gp.buttons.length}</div>
+                    ${axesHtml}
+                    ${btnsHtml}
                 </div>
-                ${calBtn}
-                <button class="primary" onclick="app.startMap('${key}')">MAP</button>
-                <label style="font-size:9px; margin-left:5px; color:#666;">
-                    <input type="checkbox" ${cfg.reverse?'checked':''} onchange="app.toggleRev('${key}')"> REV
-                </label>
             `;
-            c.appendChild(div);
         });
-    }
-
-    updateMappingVisuals() {
-        Object.keys(FUNCTIONS).forEach(key => {
-            const cfg = this.config[key];
-            const el = document.getElementById(`vis-${key}`);
-            if(!cfg.mapped || !el) return;
-
-            const gp = this.devices.find(d => d.id === cfg.devId);
-            if(!gp) { el.style.width = '0%'; return; }
-
-            let val = (cfg.type === 'axis') ? gp.axes[cfg.idx] : gp.buttons[cfg.idx].value;
-            
-            // Normalize
-            let norm = (val - cfg.min) / (cfg.max - cfg.min);
-            norm = Math.max(0, Math.min(1, norm));
-            if (cfg.reverse) norm = 1.0 - norm;
-            
-            el.style.width = `${norm * 100}%`;
-        });
-    }
-
-    autoDetect() {
-        // T.16000M logic
-        let found = false;
-        this.devices.forEach(d => {
-            const id = d.id.toLowerCase();
-            if (id.includes('b10a') || id.includes('t.16000m')) {
-                this.forceMap('pitch', d.id, 1, 'axis');
-                this.forceMap('roll', d.id, 0, 'axis');
-                this.forceMap('trigger', d.id, 0, 'button');
-                found = true;
-            }
-            if (id.includes('b687') || id.includes('twcs')) {
-                this.forceMap('throttle', d.id, 2, 'axis');
-                // Try guessing rudder on Quest? Often it's axis 5 or 6, or Button triggers
-                found = true;
-            }
-        });
-        if(found) { this.initUI(); alert("Autodetect applied. Verify Rudder Manually."); }
-        else alert("No known devices found.");
-    }
-
-    forceMap(key, devId, idx, type) {
-        this.config[key].mapped = true;
-        this.config[key].devId = devId;
-        this.config[key].idx = idx;
-        this.config[key].type = type;
-        this.config[key].min = -1; this.config[key].max = 1;
-        this.save();
-    }
-
-    toggleRev(key) {
-        this.config[key].reverse = !this.config[key].reverse;
-        this.save();
-    }
-
-    showModal(html) {
-        const m = document.getElementById('modal-overlay');
-        document.getElementById('modal-content').innerHTML = html;
-        m.style.display = 'flex';
-    }
-    cancelModal() {
-        this.state.mode = 'idle';
-        document.getElementById('modal-overlay').style.display = 'none';
-    }
-    exportConfig() {
-        const blob = new Blob([JSON.stringify(this.config, null, 2)], {type:'application/json'});
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = 'flight_config_v3.json';
-        a.click();
+        c.innerHTML = html;
     }
 }
 
-window.app = new Calibrator();
-
+window.logger = new Diagnostics();
 </script>
 </body>
 </html>
